@@ -169,9 +169,8 @@
     view = "board";
   }
 
-  async function handleRun(values: Record<string, string>) {
-    if (!repoPath || !selectedCommand) return;
-    const commandId = selectedCommand.id;
+  async function handleRun(commandId: string, values: Record<string, string>) {
+    if (!repoPath) return;
     const runId = crypto.randomUUID();
     runs = { ...runs, [commandId]: { runId, running: true, lines: [] } };
 
@@ -234,6 +233,7 @@
       const mockState = params.get("mockstate");
       const forcedSelect = params.get("select");
       const forcedSearch = params.get("search");
+      const forcedRun = params.get("run");
       if (mockState === "modal" || mockState === "trusted") {
         void (async () => {
           await handleOpenRepo();
@@ -241,6 +241,11 @@
             await handleTrust();
             if (forcedSelect) selectCommand(forcedSelect);
             if (forcedSearch) search = forcedSearch;
+            // `?run=<command-id>` kicks off a mock run without navigating
+            // into its run view, so a board screenshot can show a card
+            // mid-run (running strip + amber meter) — see "Mock mode" in
+            // the README.
+            if (forcedRun) void handleRun(forcedRun, {});
           }
         })();
       }
@@ -279,7 +284,7 @@
           {doctorReport}
           running={selectedRun?.running ?? false}
           outputLines={selectedRun?.lines ?? []}
-          onRun={handleRun}
+          onRun={(values) => handleRun(selectedCommand.id, values)}
           onBack={backToBoard}
         />
       </main>

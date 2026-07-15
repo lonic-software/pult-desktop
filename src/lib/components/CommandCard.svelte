@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { CommandInfo } from "../types";
-  import type { Readiness } from "../types";
-  import Lamp from "./Lamp.svelte";
+  import type { CommandInfo, Readiness } from "../types";
+  import { meterStateFor } from "../readiness";
+  import Meter from "./Meter.svelte";
 
   interface Props {
     command: CommandInfo;
@@ -13,6 +13,8 @@
 
   let { command, state, running, staggerDelay, onSelect }: Props = $props();
 
+  const meterState = $derived(meterStateFor(state, running));
+
   const paramMarker = $derived.by(() => {
     if (command.interactive) return "terminal-only";
     const n = command.params.length;
@@ -21,28 +23,24 @@
   });
 </script>
 
-<button
-  type="button"
-  class="card micro"
-  style="--lamp-delay: {staggerDelay}"
-  onclick={onSelect}
->
-  <div class="card-top">
-    <Lamp {state} />
-    <span class="card-title">{command.title}</span>
-  </div>
+<button type="button" class="card micro" onclick={onSelect}>
+  <Meter state={meterState} {staggerDelay} />
 
-  {#if command.description}
-    <p class="card-desc">{command.description}</p>
-  {/if}
+  <div class="content">
+    <span class="title">{command.title}</span>
 
-  <div class="card-footer mono">
-    <span class="card-id">{command.id}</span>
-    {#if running}
-      <span class="card-marker running-marker">Running…</span>
-    {:else if paramMarker}
-      <span class="card-marker">{paramMarker}</span>
+    {#if command.description}
+      <p class="desc">{command.description}</p>
     {/if}
+
+    <div class="footer mono">
+      <span class="id">{command.id}</span>
+      {#if running}
+        <span class="marker running-marker">Running…</span>
+      {:else if paramMarker}
+        <span class="marker">{paramMarker}</span>
+      {/if}
+    </div>
   </div>
 
   {#if running}
@@ -54,47 +52,57 @@
 </button>
 
 <style>
+  /* A pressable pad: raised at rest (emboss highlight + soft drop shadow),
+     pressed on hover/active (nudges down 1px, shadow flattens). */
   .card {
     position: relative;
     display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
+    gap: 11px;
+    align-items: flex-start;
     text-align: left;
-    padding: var(--space-4);
-    /* Recessed into the module: the group panel already carries the panel
-       surface + hairline border, so a permanent border here would nest a
-       box inside a box. bg (vs. the panel's --panel) reads as a shallow
-       slot instead — the border only shows up as an interactive cue. */
-    background: var(--bg);
-    border: 1px solid transparent;
-    border-radius: var(--radius-panel);
+    padding: 13px;
+    background: var(--pad);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-control);
     color: var(--ink);
+    cursor: pointer;
+    min-height: 120px;
     min-width: 0;
+    box-shadow:
+      inset 0 1px 0 var(--emboss-light),
+      0 1px 3px rgba(0, 0, 0, 0.28);
   }
 
-  .card:hover {
-    border-color: color-mix(in srgb, var(--ink) 40%, var(--line));
+  .card:hover,
+  .card:active {
+    transform: translateY(1px);
+    box-shadow:
+      inset 0 1px 0 var(--emboss-light),
+      0 1px 1px rgba(0, 0, 0, 0.2);
   }
 
-  .card-top {
+  .content {
     display: flex;
-    align-items: center;
-    gap: var(--space-2);
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+    min-height: 96px;
   }
 
-  .card-title {
+  .title {
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
+    line-height: 1.2;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
   }
 
-  .card-desc {
+  .desc {
     margin: 0;
-    font-size: 13px;
+    font-size: 12.5px;
     color: var(--muted);
     line-height: 1.4;
     display: -webkit-box;
@@ -104,40 +112,57 @@
     overflow: hidden;
   }
 
-  .card-footer {
+  .footer {
     margin-top: auto;
-    padding-top: var(--space-1);
+    padding-top: 4px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-2);
+    font-size: 11px;
     color: var(--muted);
   }
 
-  .card-id {
+  /* The rack's narrowest (1-column, 150px) modules don't leave much room
+     for both the id and the marker on one line. The id is the stable
+     identifier — like a part number — so it keeps a readable floor (at
+     least ~4 characters before ellipsis) and absorbs the available space;
+     the marker is the secondary, disposable annotation, so it's the one
+     that gives way, capped so it can never squeeze the id down to a single
+     character. flex-grow on the id also naturally pushes the marker to the
+     row's end when there's room, preserving the right-aligned look. */
+  .id {
+    flex: 1 1 auto;
+    min-width: 6ch;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    min-width: 0;
   }
 
-  .card-marker {
-    flex: none;
+  .marker {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .running-marker {
     color: var(--accent);
+    /* Active-state feedback matters more here than the static param-count
+       marker this replaces, so it gets more room before eliding. */
+    max-width: 70%;
   }
 
   .running-strip {
     position: absolute;
-    left: var(--radius-panel);
-    right: var(--radius-panel);
+    left: 8px;
+    right: 8px;
     bottom: 0;
     height: 2px;
     overflow: hidden;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    border-radius: 0 0 6px 6px;
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
   .running-strip::after {
@@ -147,10 +172,10 @@
     bottom: 0;
     width: 40%;
     background: var(--accent);
-    animation: running-sweep 1.1s ease-in-out infinite;
+    animation: pultsweep 1.1s ease-in-out infinite;
   }
 
-  @keyframes running-sweep {
+  @keyframes pultsweep {
     0% {
       left: -40%;
     }

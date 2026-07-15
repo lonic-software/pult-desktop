@@ -60,16 +60,6 @@ code,
   font-size: 12px;
 }
 
-/* Console silkscreen label style for group headers. */
-.group-label {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-}
-
 /* Micro-transitions on hover/focus only — never longer than 120ms, and
    never for anything but opacity/transform. */
 .micro {

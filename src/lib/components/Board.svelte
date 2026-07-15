@@ -20,9 +20,10 @@
 
   let { groups, trusted, doctorReport, runs, search, onSelect }: Props = $props();
 
-  // Row-major power-on stagger across the whole board (not per-section) —
-  // matches the sidebar's original cross-group stagger. Capped so a long
-  // listing doesn't leave the last cards waiting seconds to light up.
+  // Row-major power-on stagger across the whole board (not per-module) —
+  // now staggers the meters' appearance rather than the old round lamp's.
+  // Capped so a long listing doesn't leave the last cards waiting seconds
+  // to light up.
   const MAX_STAGGER_ROWS = 24;
   const flat = $derived(groups.flatMap((g) => g.commands));
   const flatIndexOf = $derived(new Map(flat.map((c: CommandInfo, i: number) => [c.id, i])));
@@ -32,20 +33,32 @@
     return `${i * 40}ms`;
   }
 
-  // A module's width is honest to its own contents — up to 3 card columns
-  // of ~240px, never more — so a 1-command group reads as a narrow module
-  // and a 7-command group as a wide one with extra internal rows, sitting
-  // side by side like blocks on a synth faceplate rather than stretching to
-  // fill the row. That target width is a *cap*, not a fixed track size: the
-  // grid itself uses auto-fit/minmax so a panel that doesn't have room for
-  // its honest width (a narrow window) reflows to fewer columns instead of
-  // forcing the whole board into horizontal scroll.
-  const MAX_PANEL_COLUMNS = 3;
-  const CARD_WIDTH_PX = 240;
-  const GRID_GAP_PX = 16; // matches --space-4 — see .grid's `gap` below
-  function panelMaxWidth(count: number): string {
-    const cols = Math.min(count, MAX_PANEL_COLUMNS);
-    return `${cols * CARD_WIDTH_PX + (cols - 1) * GRID_GAP_PX}px`;
+  // Rack layout (from the design template): the board is a rack of 150px
+  // columns, and each module spans up to 3 of them — one per card, capped —
+  // so a 1-command group is a single narrow slot and a 7-command group
+  // spans the full 3 with extra internal rows, sitting side by side like
+  // rack modules rather than stretching to fill the row.
+  //
+  // `grid-column: span N` is a hard request CSS Grid won't shrink on its
+  // own: on a narrow window a 3-wide module would force extra implicit
+  // columns and blow out the board horizontally (the exact failure the
+  // previous fieldset-based layout hit at 760px, fixed there with a
+  // max-width cap). The template's literal rack grid doesn't have an
+  // equivalent auto-fit escape hatch, so here we measure the rack's actual
+  // rendered width (via bind:clientWidth, backed by Svelte's own
+  // ResizeObserver — no manual listener needed) and clamp every module's
+  // span to however many 150px columns actually fit, so narrow windows
+  // reflow instead of overflowing. Verified at 760px.
+  const RACK_UNIT_PX = 150;
+  const RACK_GAP_PX = 16;
+  const MAX_MODULE_COLUMNS = 3;
+  let rackWidth = $state(0);
+  const rackColumns = $derived(
+    Math.max(1, Math.floor((rackWidth + RACK_GAP_PX) / (RACK_UNIT_PX + RACK_GAP_PX))),
+  );
+
+  function moduleSpan(count: number): number {
+    return Math.max(1, Math.min(count, MAX_MODULE_COLUMNS, rackColumns));
   }
 </script>
 
@@ -56,11 +69,20 @@
         <p>No commands match{search.trim() ? ` "${search.trim()}"` : ""}.</p>
       </div>
     {:else}
-      <div class="panels">
+      <div class="rack" bind:clientWidth={rackWidth}>
         {#each groups as group (group.key)}
-          <fieldset class="panel">
-            <legend class="group-label">{group.label}</legend>
-            <div class="grid" style="max-width: {panelMaxWidth(group.commands.length)}">
+          {@const span = moduleSpan(group.commands.length)}
+          <div class="module" style="grid-column: span {span}">
+            <span class="screw screw-tl" aria-hidden="true"></span>
+            <span class="screw screw-tr" aria-hidden="true"></span>
+            <span class="screw screw-bl" aria-hidden="true"></span>
+            <span class="screw screw-br" aria-hidden="true"></span>
+
+            <div class="module-label-row">
+              <span class="module-label">{group.label}</span>
+            </div>
+
+            <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
               {#each group.commands as cmd (cmd.id)}
                 {@const state = readinessFor(cmd, trusted, doctorReport)}
                 <CommandCard
@@ -72,7 +94,7 @@
                 />
               {/each}
             </div>
-          </fieldset>
+          </div>
         {/each}
       </div>
     {/if}
@@ -84,49 +106,92 @@
     height: 100%;
     overflow-y: auto;
     padding: var(--space-6);
+    /* Subtle vertical pinstripe from the design template — reads as a
+       machined panel surface rather than a flat page background. */
+    background-image: repeating-linear-gradient(90deg, rgba(128, 128, 128, 0.045) 0 1px, transparent 1px 3px);
   }
 
-  .panels {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
+  .rack {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 150px);
     gap: var(--space-4);
+    align-items: start;
+    justify-content: start;
   }
 
-  /* Module faceplate: a hairline frame with the silkscreen label breaking
-     the top border, courtesy of plain fieldset/legend layout (no absolute
-     positioning tricks needed — this is the native rendering when legend
-     is a fieldset's first child). Sized to its own grid's content, never
-     stretched to the row's full width. */
-  .panel {
+  /* Module faceplate: hairline frame, emboss + drop shadow, four corner
+     screws, and a centered engraved label breaking a hairline divider —
+     this replaces the previous fieldset/legend construction. */
+  .module {
+    position: relative;
     min-width: 0;
-    max-width: 100%;
     margin: 0;
     border: 1px solid var(--line);
-    border-radius: var(--radius-panel);
-    padding: var(--space-4);
+    border-radius: 8px;
+    padding: 13px 15px 15px;
     background: var(--panel);
+    box-shadow:
+      inset 0 1px 0 var(--emboss-light),
+      0 2px 5px rgba(0, 0, 0, 0.22);
   }
 
-  .panel > legend {
-    margin-inline-start: var(--space-2);
-    padding: 0 var(--space-2);
+  .screw {
+    position: absolute;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--screw);
+    box-shadow:
+      inset 0 1px 1.5px rgba(0, 0, 0, 0.5),
+      0 1px 0 var(--emboss-light);
   }
 
-  .grid {
+  .screw-tl {
+    top: 8px;
+    left: 8px;
+  }
+
+  .screw-tr {
+    top: 8px;
+    right: 8px;
+  }
+
+  .screw-bl {
+    bottom: 8px;
+    left: 8px;
+  }
+
+  .screw-br {
+    bottom: 8px;
+    right: 8px;
+  }
+
+  .module-label-row {
+    display: flex;
+    justify-content: center;
+    margin: 1px 0 12px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .module-label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--engrave);
+    text-shadow: 0 1px 0 var(--emboss-light);
+  }
+
+  .module-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: var(--space-4);
-    /* Without this, grid's default row-stretch forces title-only cards to
-       match the height of a description-bearing neighbor in the same row,
-       leaving a dead gap above the footer — exactly the "looks like a bug"
-       case the title-only card is supposed to avoid. Each card sizes to its
-       own content instead. */
+    gap: var(--space-3);
     align-items: start;
   }
 
   .no-matches {
-    flex: 1;
+    height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;

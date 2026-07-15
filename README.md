@@ -71,82 +71,124 @@ without manual clicking (see `onMount` in `src/routes/+page.svelte`):
 - `?mockstate=trusted` — open and trust it, landing on the board
 - `?select=<command-id>` — additionally open a command's run view (with `trusted`)
 - `?search=<query>` — additionally filter the board (with `trusted`)
+- `?run=<command-id>` — additionally kick off a mock run in the background
+  (with `trusted`), without navigating into its run view — lets a board
+  screenshot catch a card mid-run (amber meter, running strip); combine
+  with a short wait after page load, since the run completes on its own
+  mock timers (see `handleRun` in `src/routes/+page.svelte`)
 - `?theme=light|dark` — force a theme regardless of OS preference
 
 These are inert outside `VITE_MOCK=1`. Used to script the canonical
-screenshot set: board light, board dark, run view, and a search-filtered
-board.
+screenshot set: board light, board dark, a board with a card mid-run, and
+a search-filtered / narrow-window board.
 
 ## Design tokens
 
-An instrument-panel identity — precise, quiet, engineered. Amber is the only
-interactive accent (focus rings, the primary Run button); green/red/gray are
-reserved for the readiness lamp alone. Full token values live in
-`src/lib/styles/tokens.css`; summary:
+**The "1b Faceplate" system.** The board's controls are meant to look
+machined into a panel — raised pads, recessed wells, emboss highlights,
+engraved labels, corner screws — rather than flat cards on a page. This is
+ported faithfully from the user's own [Claude Design](https://claude.ai/design)
+project, "Pult board redesign," variant 1b (see "Layout" below for the
+rationale and provenance). Amber is still the only interactive accent;
+green/red/amber are reserved for the readiness meter alone. Full token
+values live in `src/lib/styles/tokens.css`; summary:
 
 | Token | Light | Dark |
 |---|---|---|
-| `--bg` | `#F7F8FA` | `#141619` |
-| `--panel` | `#FFFFFF` | `#1C1F24` |
+| `--bg` | `#DCDEE2` | `#0E0F12` |
+| `--panel` | `#F4F5F7` | `#1C2026` |
+| `--pad` | `#ECEEF1` | `#20242B` |
 | `--ink` | `#1A1D23` | `#E9EBEE` |
 | `--muted` | `#5C6470` | `#8A919C` |
-| `--line` | `#E3E6EB` | `#2A2E35` |
-| `--accent` (amber) | `#B8770A` | `#E5A93D` |
-| `--lamp-green` | `#2FA463` | `#3FBF77` |
-| `--lamp-red` | `#D14343` | `#E05C5C` |
-| `--lamp-off` | `#9AA1AB` | `#9AA1AB` |
+| `--line` | `#DDE0E5` | `#31363E` |
+| `--accent` (amber) | `#E0982A` | `#E5A93D` |
+| `--lamp-green` | `#38C680` | `#3FBF77` |
+| `--lamp-red` | `#E05555` | `#E05C5C` |
+| `--seg-off` | `#C4C8CE` | `#2B3037` |
+| `--engrave` | `#4E555F` | `#AAB0B9` |
+| `--screw` | `#B6BAC1` | `#43484F` |
+| `--emboss-light` | `rgba(255,255,255,.95)` | `rgba(255,255,255,.06)` |
+| `--led-well` | `#565D66` | `#08090C` |
+| `--well-inset` | `rgba(0,0,0,.3)` | *(unset — per-usage fallback)* |
 
-Radii: 6px controls, 10px panels. Hairline (1px) borders, no shadows except
-the trust modal's soft elevation. 4px spacing grid. Type: IBM Plex Sans for
-UI text (13px body, 15px/600 command titles, 11px/500 uppercase group
-labels), IBM Plex Mono for ids/param names/check commands/output. Fonts are
-vendored as local woff2 files under `static/fonts/` — Tauri's CSP forbids
-remote assets, and this keeps the app fully self-contained offline too (see
-`static/fonts/LICENSE-IBMPlex{Sans,Mono}.txt`, SIL OFL).
+Note `--bg` is deliberately a darker gray than `--panel`/`--pad` in light
+mode — that's what makes panels and pads read as raised/recessed plates
+against it rather than flat cards on a page, and the board itself carries a
+subtle vertical pinstripe (a repeating gradient) reinforcing the machined-
+panel surface. `--well-inset` is intentionally undefined in dark mode: two
+different recessed elements (the LED well, the toolbar search input) each
+supply their own fallback shadow depth via `var(--well-inset, <fallback>)`,
+and only light mode overrides it uniformly.
 
-The signature element is the **readiness lamp**: an 8px dot (12px in the
-run view header) with a soft glow when lit — green for a passing `check:`, red
-for a failing one, flat unlit gray for "no check" or "untrusted". On first
-load or a doctor refresh, lamps power on with a 40ms-per-row stagger
-(capped at 24 rows); `prefers-reduced-motion` collapses this to instant.
+Radii: 5-6px controls, 8px modules, 10px other panels (modals). Hairline
+(1px) borders, emboss insets, and soft drop shadows on every raised
+surface — no flat chips. 4px spacing grid. Type: IBM Plex Sans for UI text
+(13px body, 15px/600 command titles, 10.5px/600 tracked-uppercase engraved
+module labels), IBM Plex Mono for ids/param names/check commands/output.
+Fonts are vendored as local woff2 files under `static/fonts/` — Tauri's CSP
+forbids remote assets, and this keeps the app fully self-contained offline
+too (see `static/fonts/LICENSE-IBMPlex{Sans,Mono}.txt`, SIL OFL).
+
+The signature element is the **segmented LED meter** (replacing an earlier
+round lamp): five vertical segments recessed into a dark well, lit
+bottom-up — 4 green for a passing `check:`, 5 red for a failing one, 3 amber
+(with a matching glow) while a command is actively running, all unlit for
+"no check" or "untrusted." Running always wins over the last known
+readiness. On first load or a doctor refresh, meters power on with a
+40ms-per-row stagger (capped at 24 rows); `prefers-reduced-motion` collapses
+this — and the running strip's sweep animation — to instant.
 
 ## Layout
 
-**Board home** replaces the old permanent sidebar. Each display group (same
-grouping rule as always — see below) renders as its own bordered module —
-the silkscreen label breaks the top border (a plain `fieldset`/`legend`,
-not a positioning trick) like an engraved OSC/FILTER/ENV block on a synth
-faceplate — and modules pack left-to-right, wrapping as needed, each sized
-to its own honest width (up to 3 card columns of ~240px) rather than
-stretching to fill the row: a 1-command group is a narrow module, a
-7-command group a wide one with extra internal rows. Inside a module, cards
-drop their own border (recessed into the panel via a subtle bg-vs-panel
-contrast instead) to keep the nested-boxes look from turning muddy; the
-border returns on hover, the focus ring stays amber. A card is a panel with
-10px radius: readiness lamp + title on the first line; an optional 1–2
-sentence description (`description`, an additive field — absent/null
-renders a deliberate title-only card, not a bug); a Plex Mono footer with
-the command id and, right-aligned, either `terminal-only` (an `interactive`
-command) or a param count. A card is a single focusable button (tab +
-Enter). A command currently running shows a slim indeterminate amber strip
-along the card's bottom edge and swaps its footer marker for "Running…" —
-and that state survives navigating away, since run state lives above the
-board/run-view switch (see `src/routes/+page.svelte`), letting more than one
-command run at once. The lamp power-on stagger (40ms/row, capped at 24 rows,
-instant under `prefers-reduced-motion`) plays across the whole board in
-row-major order. The toolbar (repo name, "Open repository…", search) is
-unchanged; search filters cards live across sections, hides empty sections,
-and shows a "no matches" state.
+**Board home** replaces the old permanent sidebar with a rack of bordered
+modules — one per display group (same grouping rule as always — see
+below) — packed left-to-right and wrapping, styled like an engraved
+OSC/FILTER/ENV block on a synth faceplate: a hairline frame, an emboss
+highlight + drop shadow, four corner screws, and a centered engraved label
+breaking a hairline divider (plain markup, no positioning tricks — this
+replaces the previous `fieldset`/`legend` construction from an earlier
+iteration). The board is a grid of 150px rack columns; each module spans up
+to 3 of them — one per card, capped — so a 1-command group is a narrow
+module and a 7-command group is a wide one with extra internal rows,
+sized to its own honest width rather than stretched to fill the row. Since
+`grid-column: span N` won't shrink itself on a narrow window, the rack's
+actual rendered width is measured (`bind:clientWidth`) and every module's
+span is clamped to however many columns actually fit, so narrow windows
+reflow instead of overflowing.
+
+Inside a module, cards are pressable pads (`--pad` surface, emboss
+highlight, drop shadow, 6px radius) that nudge down 1px with a flattened
+shadow on hover/active — a physical press, not just a border change. Each
+pad: a segmented LED meter on the left, then title (15/600, nowrap-
+ellipsis), an optional 1–2 sentence description (`description`, an
+additive field — absent/null renders a deliberate title-only card, not a
+bug, 2-line clamp otherwise), and a Plex Mono footer with the command id
+and, when relevant, either `terminal-only` (an `interactive` command) or a
+param count — the id keeps a readable floor and the marker gives way first,
+since the narrowest rack modules don't leave much room for both. A pad is a
+single focusable button (tab + Enter, amber focus ring). A command
+currently running shows a slim indeterminate amber strip along the pad's
+bottom edge and swaps its footer marker for "Running…" (given more room
+than the static marker it replaces) — and that state survives navigating
+away, since run state lives above the board/run-view switch (see
+`src/routes/+page.svelte`), letting more than one command run at once. The
+toolbar (repo name, "Open repository…", search) keeps the same raised-
+button / recessed-search-input language; search filters cards live across
+modules, hides empty ones, and shows a "no matches" state.
 
 **Run view** is what clicking a card opens: a focused takeover of the
 content area (not a modal) with a "← Board" control (also `Esc`), an
-enlarged lamp + title + description + a plain status line, the generated
-param form, the Run button, and the streamed output pane.
+enlarged LED meter + title + description + a plain status line, the
+generated param form, the Run button, and the streamed output pane.
 
 Design rationale: the board *is* the product's own name — Hungarian for
-dashboard — so the UI leans into that metaphor directly. A glance at the
-board should read as state-at-a-glance, the way a real instrument panel
-does, rather than as a settings list you have to click into to understand.
+dashboard — so the UI leans into that metaphor directly, and the faceplate
+system pushes it further: state-at-a-glance should look like reading an
+actual instrument panel, not a settings list. The board's visual design was
+imported from the user's Claude Design project "Pult board redesign,"
+variant "1b Faceplate" — chosen by the user from several options and
+ported here as closely as the app's real content (longer command ids and
+descriptions than the design mockup's placeholders) allows.
 
 ## v0 scope
 
@@ -219,9 +261,11 @@ override with `PULT_DESKTOP_TEST_BIN` if your `tui` checkout lives elsewhere.
 Tests skip (rather than fail) if no binary is found.
 
 Mock-mode UI screenshots are the other half of manual verification — see
-"Mock mode" above for the URL params used to script them. The canonical set:
+"Mock mode" above for the URL params used to script them. The current
+canonical set (faceplate system, 1200×760 unless noted):
 
-- `board-light.png` — `?mockstate=trusted&theme=light`
-- `board-dark.png` — `?mockstate=trusted&theme=dark`
-- `run-view.png` — `?mockstate=trusted&theme=light&select=<command-id>`
-- `board-search.png` — `?mockstate=trusted&theme=light&search=<query>`
+- `faceplate2-light.png` — `?mockstate=trusted&theme=light`
+- `faceplate2-dark.png` — `?mockstate=trusted&theme=dark`
+- `faceplate2-running.png` — `?mockstate=trusted&theme=light&run=<command-id>`,
+  screenshotted shortly after load so the run is still in flight
+- `faceplate2-narrow.png` — same as light, at 760px wide

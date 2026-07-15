@@ -44,10 +44,11 @@
 <style>
   .toolbar {
     position: relative;
-    height: 44px;
+    height: 46px;
     flex: none;
     border-bottom: 1px solid var(--line);
     background: var(--panel);
+    box-shadow: inset 0 1px 0 var(--emboss-light);
   }
 
   .drag-region {
@@ -80,12 +81,17 @@
   }
 
   .search {
-    flex: 0 1 260px;
-    padding: var(--space-1) var(--space-2);
+    flex: 0 1 220px;
+    padding: 5px 9px;
     border: 1px solid var(--line);
-    border-radius: var(--radius-control);
+    border-radius: 5px;
     background: var(--bg);
     color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    /* Recessed, like the LED well — a shallow cut into the panel rather
+       than a flat input sitting on top of it. */
+    box-shadow: inset 0 1px 2px var(--well-inset, rgba(0, 0, 0, 0.22));
   }
 
   .spacer {
@@ -94,11 +100,16 @@
 
   button {
     border: 1px solid var(--line);
-    border-radius: var(--radius-control);
+    border-radius: 5px;
     background: var(--panel);
     color: var(--ink);
-    padding: var(--space-1) var(--space-3);
+    padding: 5px 11px;
     font-size: 12px;
+    /* Raised, matching the modules/pads: an emboss highlight plus a soft
+       outer shadow so buttons read as actual controls, not flat chips. */
+    box-shadow:
+      inset 0 1px 0 var(--emboss-light),
+      0 1px 2px rgba(0, 0, 0, 0.18);
   }
 
   button:hover {
@@ -107,7 +118,8 @@
 
   .icon-button {
     padding: var(--space-1) var(--space-2);
-    min-width: 28px;
+    width: 28px;
+    height: 26px;
     text-align: center;
   }
 </style>

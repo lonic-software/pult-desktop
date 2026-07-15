@@ -1,20 +1,31 @@
-/* Pult design tokens — an instrument-panel identity: precise, quiet,
-   engineered. Amber is the only interactive accent; green/red/gray belong
-   to the readiness lamp exclusively. See README's "Design tokens" section
-   for the full rationale. */
+/* Pult design tokens — the "1b Faceplate" system: an instrument panel you'd
+   actually find controls raised and recessed on — emboss highlights, pressed
+   pads, engraved labels, corner screws. Amber is the only interactive
+   accent; green/red/amber belong to the readiness meter exclusively. Ported
+   from the user's Claude Design project ("Pult board redesign", variant 1b)
+   — see README's "Design tokens" section for the full rationale, and
+   /private/tmp/.../design-import/faceplate-tokens.md for the source values. */
 
 :root {
-  /* Light (default) */
-  --bg: #f7f8fa;
-  --panel: #ffffff;
+  /* Light (default) — bg is a darker gray than --panel/--pad on purpose, so
+     panels and pads read as raised/recessed plates against it, not just
+     flat cards on a page. */
+  --bg: #dcdee2;
+  --panel: #f4f5f7;
+  --pad: #eceef1;
   --ink: #1a1d23;
   --muted: #5c6470;
-  --line: #e3e6eb;
-  --accent: #b8770a;
+  --line: #dde0e5;
+  --accent: #e0982a;
   --accent-ink: #ffffff;
-  --lamp-green: #2fa463;
-  --lamp-red: #d14343;
-  --lamp-off: #9aa1ab;
+  --lamp-green: #38c680;
+  --lamp-red: #e05555;
+  --seg-off: #c4c8ce;
+  --engrave: #4e555f;
+  --screw: #b6bac1;
+  --emboss-light: rgba(255, 255, 255, 0.95);
+  --led-well: #565d66;
+  --well-inset: rgba(0, 0, 0, 0.3);
 
   /* Radii */
   --radius-control: 6px;
@@ -38,45 +49,71 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #141619;
-    --panel: #1c1f24;
+    --bg: #0e0f12;
+    --panel: #1c2026;
+    --pad: #20242b;
     --ink: #e9ebee;
     --muted: #8a919c;
-    --line: #2a2e35;
+    --line: #31363e;
     --accent: #e5a93d;
-    --accent-ink: #1a1d23;
+    --accent-ink: #141619;
     --lamp-green: #3fbf77;
     --lamp-red: #e05c5c;
-    --lamp-off: #9aa1ab;
+    --seg-off: #2b3037;
+    --engrave: #aab0b9;
+    --screw: #43484f;
+    --emboss-light: rgba(255, 255, 255, 0.06);
+    --led-well: #08090c;
+    /* Explicitly unset (not just "not redeclared") — the base :root above
+       sets --well-inset for light, and custom properties keep cascading
+       from a less-specific rule when a more-specific one doesn't mention
+       them. `initial` resets to the guaranteed-invalid value so each
+       usage's own var() fallback kicks in instead: rgba(0,0,0,0.75) for
+       the LED well, rgba(0,0,0,0.22) for the search input — see
+       faceplate-tokens.md. */
+    --well-inset: initial;
     color-scheme: dark;
   }
 }
 
 /* Manual override wins over the OS preference in both directions. */
 :root[data-theme="light"] {
-  --bg: #f7f8fa;
-  --panel: #ffffff;
+  --bg: #dcdee2;
+  --panel: #f4f5f7;
+  --pad: #eceef1;
   --ink: #1a1d23;
   --muted: #5c6470;
-  --line: #e3e6eb;
-  --accent: #b8770a;
+  --line: #dde0e5;
+  --accent: #e0982a;
   --accent-ink: #ffffff;
-  --lamp-green: #2fa463;
-  --lamp-red: #d14343;
-  --lamp-off: #9aa1ab;
+  --lamp-green: #38c680;
+  --lamp-red: #e05555;
+  --seg-off: #c4c8ce;
+  --engrave: #4e555f;
+  --screw: #b6bac1;
+  --emboss-light: rgba(255, 255, 255, 0.95);
+  --led-well: #565d66;
+  --well-inset: rgba(0, 0, 0, 0.3);
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #141619;
-  --panel: #1c1f24;
+  --bg: #0e0f12;
+  --panel: #1c2026;
+  --pad: #20242b;
   --ink: #e9ebee;
   --muted: #8a919c;
-  --line: #2a2e35;
+  --line: #31363e;
   --accent: #e5a93d;
-  --accent-ink: #1a1d23;
+  --accent-ink: #141619;
   --lamp-green: #3fbf77;
   --lamp-red: #e05c5c;
-  --lamp-off: #9aa1ab;
+  --seg-off: #2b3037;
+  --engrave: #aab0b9;
+  --screw: #43484f;
+  --emboss-light: rgba(255, 255, 255, 0.06);
+  --led-well: #08090c;
+  /* See the @media dark block above for why this must be an explicit unset. */
+  --well-inset: initial;
   color-scheme: dark;
 }

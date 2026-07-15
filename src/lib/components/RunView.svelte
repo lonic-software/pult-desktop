@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { CommandInfo, DoctorReport } from "../types";
-  import { readinessFor, readinessLabel } from "../readiness";
-  import Lamp from "./Lamp.svelte";
+  import { meterStateFor, readinessFor, readinessLabel } from "../readiness";
+  import Meter from "./Meter.svelte";
   import ParamField from "./ParamField.svelte";
   import OutputPane from "./OutputPane.svelte";
 
@@ -33,8 +33,9 @@
     values = initial;
   });
 
-  const lampState = $derived(readinessFor(command, trusted, doctorReport));
-  const label = $derived(readinessLabel(lampState));
+  const readiness = $derived(readinessFor(command, trusted, doctorReport));
+  const label = $derived(readinessLabel(readiness));
+  const meterState = $derived(meterStateFor(readiness, running));
 
   const disabledReason = $derived.by(() => {
     if (command.interactive) return `Needs a real terminal — run \`pult ${command.id}\` in one.`;
@@ -55,7 +56,7 @@
 
   <header class="header">
     <div class="title-row">
-      <Lamp state={lampState} size="lg" />
+      <Meter state={meterState} size="lg" />
       <h1 class="title">{command.title}</h1>
     </div>
     {#if command.description}
@@ -72,7 +73,7 @@
     </div>
   </header>
 
-  {#if lampState === "failed"}
+  {#if readiness === "failed"}
     <div class="check-failed">
       <span class="check-label">Check failed</span>
       <code class="mono">{command.check}</code>
