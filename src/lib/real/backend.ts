@@ -1,0 +1,53 @@
+// The real backend: thin wrappers over Tauri's invoke() + event system,
+// matching the mock backend's shape (src/lib/mock/backend.ts) field for
+// field so App.svelte is agnostic to which one it's using.
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import type { DoctorReport, Listing, RunEvent } from "../types";
+
+export async function pickFolder(): Promise<string | null> {
+  const result = await open({ directory: true, multiple: false, title: "Open repository" });
+  return typeof result === "string" ? result : null;
+}
+
+export async function openRepo(path: string): Promise<Listing> {
+  return invoke<Listing>("open_repo", { path });
+}
+
+export async function trustRepo(path: string): Promise<void> {
+  await invoke<void>("trust_repo", { path });
+}
+
+export async function doctorCheck(path: string): Promise<DoctorReport> {
+  return invoke<DoctorReport>("doctor", { path });
+}
+
+export async function pultVersion(): Promise<string> {
+  return invoke<string>("pult_version");
+}
+
+export async function getPultPath(): Promise<string | null> {
+  return invoke<string | null>("get_pult_path");
+}
+
+export async function setPultPath(path: string): Promise<void> {
+  await invoke<void>("set_pult_path", { path });
+}
+
+export async function runCommand(
+  path: string,
+  id: string,
+  values: Record<string, string>,
+  onEvent: (event: RunEvent) => void,
+): Promise<void> {
+  const unlisten = await listen<RunEvent>("pult://run-output", (event) => {
+    onEvent(event.payload);
+  });
+  try {
+    await invoke<void>("run_command", { path, id, values });
+  } finally {
+    unlisten();
+  }
+}

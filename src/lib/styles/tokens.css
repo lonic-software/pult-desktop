@@ -1,0 +1,82 @@
+/* Pult design tokens — an instrument-panel identity: precise, quiet,
+   engineered. Amber is the only interactive accent; green/red/gray belong
+   to the readiness lamp exclusively. See README's "Design tokens" section
+   for the full rationale. */
+
+:root {
+  /* Light (default) */
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --ink: #1a1d23;
+  --muted: #5c6470;
+  --line: #e3e6eb;
+  --accent: #b8770a;
+  --accent-ink: #ffffff;
+  --lamp-green: #2fa463;
+  --lamp-red: #d14343;
+  --lamp-off: #9aa1ab;
+
+  /* Radii */
+  --radius-control: 6px;
+  --radius-panel: 10px;
+
+  /* Spacing (4px grid) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Type */
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141619;
+    --panel: #1c1f24;
+    --ink: #e9ebee;
+    --muted: #8a919c;
+    --line: #2a2e35;
+    --accent: #e5a93d;
+    --accent-ink: #1a1d23;
+    --lamp-green: #3fbf77;
+    --lamp-red: #e05c5c;
+    --lamp-off: #9aa1ab;
+    color-scheme: dark;
+  }
+}
+
+/* Manual override wins over the OS preference in both directions. */
+:root[data-theme="light"] {
+  --bg: #f7f8fa;
+  --panel: #ffffff;
+  --ink: #1a1d23;
+  --muted: #5c6470;
+  --line: #e3e6eb;
+  --accent: #b8770a;
+  --accent-ink: #ffffff;
+  --lamp-green: #2fa463;
+  --lamp-red: #d14343;
+  --lamp-off: #9aa1ab;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #141619;
+  --panel: #1c1f24;
+  --ink: #e9ebee;
+  --muted: #8a919c;
+  --line: #2a2e35;
+  --accent: #e5a93d;
+  --accent-ink: #1a1d23;
+  --lamp-green: #3fbf77;
+  --lamp-red: #e05c5c;
+  --lamp-off: #9aa1ab;
+  color-scheme: dark;
+}

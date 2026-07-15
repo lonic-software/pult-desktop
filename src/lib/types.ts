@@ -1,0 +1,70 @@
+// Typed mirrors of pult's documented JSON surfaces (schema 1), matching
+// src-tauri/src/types.rs field-for-field. Schema 1 is additive-only, so
+// every field here is exactly what the docs promise — extra fields a future
+// pult adds are simply ignored by JSON.parse, not an error.
+
+export interface Param {
+  name: string;
+  kind: "pick" | "input";
+  options?: string[];
+  source?: string;
+  depends_on?: string[];
+  default?: string | null;
+  secret?: boolean;
+}
+
+export interface IncludeInfo {
+  source: string;
+  kind: string;
+  name: string | null;
+  url?: string;
+  rev?: string;
+  rev_kind?: string;
+  resolved_sha?: string;
+}
+
+export interface CommandInfo {
+  id: string;
+  title: string;
+  origin: string | null;
+  category: string | null;
+  params: Param[];
+  check: string | null;
+  interactive: boolean;
+  steps: string[] | null;
+}
+
+export interface Listing {
+  schema: number;
+  pult_version: string;
+  name: string;
+  manifest: string;
+  dir: string;
+  run_dir: string;
+  scope: string;
+  trusted: boolean;
+  includes: IncludeInfo[];
+  commands: CommandInfo[];
+}
+
+export interface DoctorEntry {
+  id: string;
+  title: string;
+  check: string | null;
+  ready: boolean | null;
+  exit_code: number | null;
+}
+
+export interface DoctorReport {
+  schema: number;
+  name: string;
+  manifest: string;
+  commands: DoctorEntry[];
+}
+
+export type RunEvent =
+  | { kind: "line"; stream: "stdout" | "stderr"; text: string }
+  | { kind: "exit"; code: number | null };
+
+/** A command's readiness lamp state, derived from doctor + trust. */
+export type Readiness = "ready" | "failed" | "none" | "untrusted";
