@@ -56,7 +56,7 @@
 
   <header class="header">
     <div class="title-row">
-      <Meter state={meterState} size="lg" />
+      <Meter state={meterState} size="lg" seed={command.id} />
       <h1 class="title">{command.title}</h1>
     </div>
     {#if command.description}

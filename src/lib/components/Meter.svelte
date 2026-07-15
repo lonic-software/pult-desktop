@@ -5,9 +5,14 @@
     state: MeterState;
     size?: "sm" | "lg";
     staggerDelay?: string;
+    /** Command id — seeds the tip-flicker's phase/period deterministically
+     *  so it's stable across re-renders and desynced across cards without
+     *  any shared clock. Optional only so the component still works if a
+     *  caller doesn't have an id handy; every real caller passes one. */
+    seed?: string;
   }
 
-  let { state, size = "sm", staggerDelay = "0ms" }: Props = $props();
+  let { state, size = "sm", staggerDelay = "0ms", seed = "" }: Props = $props();
 
   // Segments lit bottom-up per the design template's meterFor: running (in
   // progress right now) always wins and shows 3 amber regardless of
@@ -24,9 +29,43 @@
   };
   const litCount = $derived(LIT_COUNT[state]);
   const segments = $derived(Array.from({ length: 5 }, (_, i) => i < litCount));
+
+  // Tip flicker: only the top-most lit segment of a *steady* readiness
+  // (ready/failed) wobbles — analog current isn't perfectly constant.
+  // Running has its own sweep animation already; the single no-check
+  // segment means "no signal," so it stays put. Index is bottom-up (see
+  // `segments` above), so the top lit segment is always `litCount - 1`.
+  const flickerTipIndex = $derived(
+    state === "ready" || state === "failed" ? litCount - 1 : -1,
+  );
+
+  // Deterministic per-card desync: a tiny string hash (no shared PRNG
+  // state, stable across re-renders) picks a period in 2.2-3.4s and a
+  // phase within that period from the command id, so cards never breathe
+  // in lockstep. `FLICKER_SETTLE_MS` is a fixed head start added on top —
+  // it keeps the animation's `animation-delay` comfortably past the 200ms
+  // illumination transition (see the `.well` rule below) so the one-time
+  // fade-in and the infinite breathing loop never fight over the same
+  // box-shadow property.
+  function seedHash(s: string, salt: number): number {
+    let h = salt >>> 0;
+    for (let i = 0; i < s.length; i++) {
+      h = (Math.imul(h, 31) + s.charCodeAt(i)) >>> 0;
+    }
+    return h;
+  }
+  const FLICKER_MIN_MS = 2200;
+  const FLICKER_RANGE_MS = 1200; // 2.2s-3.4s period
+  const FLICKER_SETTLE_MS = 260;
+  const flickerDuration = $derived(FLICKER_MIN_MS + (seedHash(seed, 0x9e3779b1) % FLICKER_RANGE_MS));
+  const flickerDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % flickerDuration));
 </script>
 
-<div class="well {size} glow-{state}" style="--meter-delay: {staggerDelay}" aria-hidden="true">
+<div
+  class="well {size} glow-{state}"
+  style="--meter-delay: {staggerDelay}; --flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms"
+  aria-hidden="true"
+>
   <div class="segments">
     {#each segments as lit, i (i)}
       <span
@@ -35,6 +74,7 @@
         class:lit-ready={lit && state === "ready"}
         class:lit-failed={lit && state === "failed"}
         class:lit-no-check={lit && state === "no-check"}
+        class:tip-flicker={i === flickerTipIndex}
       ></span>
     {/each}
   </div>
@@ -82,6 +122,40 @@
     --glow: color-mix(in srgb, var(--lamp-red) 65%, transparent);
   }
 
+  /* Tip flicker, part 1: the glow breathes (±1px blur/spread on the same
+     shadow layer built above) in steady states only. `animation-delay`
+     (see --flicker-delay above) is always positive and comfortably past
+     the 200ms illumination transition, so the animation only takes over
+     box-shadow *after* that one-time fade-in has already finished —
+     avoiding a fight between the transition and this infinite loop over
+     the same property. prefers-reduced-motion already collapses all
+     animation-duration to ~0 globally (see global.css), so this is inert
+     there without any extra guard. */
+  .well.glow-ready,
+  .well.glow-failed {
+    animation: lamp-breathe var(--flicker-duration, 2800ms) ease-in-out infinite;
+    animation-delay: var(--flicker-delay, 0ms);
+  }
+
+  @keyframes lamp-breathe {
+    0%,
+    100% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 11px -1px var(--glow, transparent);
+    }
+    45% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 10px -1px var(--glow, transparent);
+    }
+    70% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 12px 0px var(--glow, transparent);
+    }
+  }
+
   .segments {
     display: flex;
     flex-direction: column-reverse;
@@ -123,8 +197,37 @@
   /* Neutral "powered, no probe" segment — a gray chosen to clearly read as
      LIT against --seg-off in both themes (darker than --seg-off in light
      mode, lighter than --seg-off in dark mode; --muted already has that
-     relationship in the token table, so it needs no bespoke token). */
+     relationship in the token table, so it needs no bespoke token). Never
+     flickers — no `tip-flicker` class is ever applied here (see
+     flickerTipIndex above) since a static segment reads as "no signal",
+     which is the point. */
   .seg.lit-no-check {
     background: var(--muted);
+  }
+
+  /* Tip flicker, part 2: opacity-only (compositor-cheap, per the brief),
+     shares the well's --flicker-duration/--flicker-delay via inheritance
+     so the tip and its glow breathe in the same phase. Irregular keyframe
+     stops (not a clean sine) read as analog current noise rather than a
+     mechanical pulse; amplitude stays inside 0.92-1.0 as specified. */
+  .seg.tip-flicker {
+    animation: lamp-tip-flicker var(--flicker-duration, 2800ms) ease-in-out infinite;
+    animation-delay: var(--flicker-delay, 0ms);
+  }
+
+  @keyframes lamp-tip-flicker {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    30% {
+      opacity: 0.97;
+    }
+    55% {
+      opacity: 0.92;
+    }
+    82% {
+      opacity: 0.99;
+    }
   }
 </style>

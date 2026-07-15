@@ -134,7 +134,7 @@
   onblur={onCardBlur}
   aria-describedby={tooltipOpen ? tooltipId : undefined}
 >
-  <Meter state={meterState} {staggerDelay} />
+  <Meter state={meterState} {staggerDelay} seed={command.id} />
 
   <div class="content">
     <span class="title">{command.title}</span>
