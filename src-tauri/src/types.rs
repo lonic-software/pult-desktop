@@ -64,6 +64,12 @@ pub struct CommandInfo {
     /// the frontend (see src/lib/grouping.ts), mirroring the rule in
     /// docs/reference.md so it stays in one place, documented, and testable.
     pub category: Option<String>,
+    /// Operator-facing one-liner shown on the board card. Additive schema
+    /// field — pult is gaining it in parallel with this app, so it may be
+    /// absent or `null` on any given pult release; treat that as "no
+    /// description" (a title-only card), never as an error.
+    #[serde(default)]
+    pub description: Option<String>,
     pub params: Vec<Param>,
     /// The readiness probe; `null` = none declared.
     pub check: Option<String>,
@@ -113,9 +119,21 @@ pub struct DoctorReport {
 
 /// A line of output streamed while a command runs, plus the terminal exit
 /// event. Emitted on the `pult://run-output` Tauri event channel.
+///
+/// `run_id` is a client-generated id (one per `run_command` invocation),
+/// threaded through so the frontend can tell concurrent runs apart — the
+/// event channel is shared across every in-flight run, not per-command, so
+/// without this a second run's output could get attributed to the first.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunEvent {
-    Line { stream: String, text: String },
-    Exit { code: Option<i32> },
+    Line {
+        run_id: String,
+        stream: String,
+        text: String,
+    },
+    Exit {
+        run_id: String,
+        code: Option<i32>,
+    },
 }
