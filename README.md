@@ -6,6 +6,11 @@ Open a repository, review what it's offering (and where those commands come
 from), trust it once, and run commands through a proper form instead of
 memorizing flags.
 
+"Pult" is Hungarian for **dashboard** — the board of controls in front of an
+operator. The app takes that literally: opening a repository surfaces a
+**board** of command cards, grouped and lit up by readiness, not a sidebar
+list with a detail pane bolted on. See "Layout" below.
+
 This app doesn't reimplement any of pult's logic. It's a thin client over
 pult's **documented machine surfaces** — everything it does, pult's CLI could
 also do standing alone.
@@ -63,11 +68,14 @@ Mock mode also understands a few URL params, used to script screenshots
 without manual clicking (see `onMount` in `src/routes/+page.svelte`):
 
 - `?mockstate=modal` — open the fixture repo and stop at the trust modal
-- `?mockstate=trusted` — open and trust it, landing on the dashboard
-- `?select=<command-id>` — additionally select a command (with `trusted`)
+- `?mockstate=trusted` — open and trust it, landing on the board
+- `?select=<command-id>` — additionally open a command's run view (with `trusted`)
+- `?search=<query>` — additionally filter the board (with `trusted`)
 - `?theme=light|dark` — force a theme regardless of OS preference
 
-These are inert outside `VITE_MOCK=1`.
+These are inert outside `VITE_MOCK=1`. Used to script the canonical
+screenshot set: board light, board dark, run view, and a search-filtered
+board.
 
 ## Design tokens
 
@@ -97,16 +105,48 @@ remote assets, and this keeps the app fully self-contained offline too (see
 `static/fonts/LICENSE-IBMPlex{Sans,Mono}.txt`, SIL OFL).
 
 The signature element is the **readiness lamp**: an 8px dot (12px in the
-detail header) with a soft glow when lit — green for a passing `check:`, red
+run view header) with a soft glow when lit — green for a passing `check:`, red
 for a failing one, flat unlit gray for "no check" or "untrusted". On first
 load or a doctor refresh, lamps power on with a 40ms-per-row stagger
 (capped at 24 rows); `prefers-reduced-motion` collapses this to instant.
+
+## Layout
+
+**Board home** replaces the old permanent sidebar. One section per display
+group (same grouping rule as always — see below), headed by the silkscreen
+label. Each section is a card grid — `repeat(auto-fill, minmax(240px, 1fr))`,
+16px gaps. A card is a panel with a hairline border and 10px radius:
+readiness lamp + title on the first line;
+an optional 1–2 sentence description (`description`, an additive field —
+absent/null renders a deliberate title-only card, not a bug); a Plex Mono
+footer with the command id and, right-aligned, either `terminal-only` (an
+`interactive` command) or a param count. A card is a single focusable
+button (tab + Enter, amber focus ring); hovering shifts the border toward
+`--ink`. A command currently running shows a slim indeterminate amber strip
+along the card's bottom edge and swaps its footer marker for "Running…" —
+and that state survives navigating away, since run state lives above the
+board/run-view switch (see `src/routes/+page.svelte`), letting more than one
+command run at once. The lamp power-on stagger (40ms/row, capped at 24 rows,
+instant under `prefers-reduced-motion`) plays across the whole board in
+row-major order. The toolbar (repo name, "Open repository…", search) is
+unchanged; search filters cards live across sections, hides empty sections,
+and shows a "no matches" state.
+
+**Run view** is what clicking a card opens: a focused takeover of the
+content area (not a modal) with a "← Board" control (also `Esc`), an
+enlarged lamp + title + description + a plain status line, the generated
+param form, the Run button, and the streamed output pane.
+
+Design rationale: the board *is* the product's own name — Hungarian for
+dashboard — so the UI leans into that metaphor directly. A glance at the
+board should read as state-at-a-glance, the way a real instrument panel
+does, rather than as a settings list you have to click into to understand.
 
 ## v0 scope
 
 **Works end-to-end**, against a real `pult` binary:
 
-- Open a repository (folder picker) → `pult --list --json` → sidebar,
+- Open a repository (folder picker) → `pult --list --json` → the board,
   grouped per pult's documented rule (`category` → module name → include
   origin → implicit "local"; local-containing groups first, then include
   order — implemented once in `src/lib/grouping.ts`)
@@ -117,7 +157,11 @@ load or a doctor refresh, lamps power on with a 40ms-per-row stagger
   text input with a "comes from the repository at prompt time" hint,
   input → text, `secret: true` → password), values sent via
   `--params-json` over stdin, stdout/stderr streamed live via Tauri events
-  into a mono output pane, exit code shown at the end
+  into a mono output pane, exit code shown at the end. Each run gets a
+  client-generated `run_id` threaded through every event on the shared
+  `pult://run-output` channel, so more than one command can run at once
+  without their output getting cross-attributed (see `RunEvent` in
+  `src-tauri/src/types.rs` and `src/routes/+page.svelte`'s `runs` map).
 - `interactive: true` commands refuse to run in-app with an explanatory hint
   (run it in a real terminal instead — no pty in v0)
 - `pult` binary resolution: `which pult`, overridable in Settings (stored via
@@ -169,4 +213,9 @@ override with `PULT_DESKTOP_TEST_BIN` if your `tui` checkout lives elsewhere.
 Tests skip (rather than fail) if no binary is found.
 
 Mock-mode UI screenshots are the other half of manual verification — see
-"Mock mode" above for the URL params used to script them.
+"Mock mode" above for the URL params used to script them. The canonical set:
+
+- `board-light.png` — `?mockstate=trusted&theme=light`
+- `board-dark.png` — `?mockstate=trusted&theme=dark`
+- `run-view.png` — `?mockstate=trusted&theme=light&select=<command-id>`
+- `board-search.png` — `?mockstate=trusted&theme=light&search=<query>`
