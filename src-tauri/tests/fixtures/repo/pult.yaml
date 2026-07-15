@@ -1,0 +1,30 @@
+version: 1
+name: demo-repo
+description: Fixture repo for pult-desktop's backend integration tests
+
+includes:
+  - source: ./mods/aws
+    prefix: aws
+
+commands:
+  - id: shell
+    title: Open a shell
+    params:
+      env: { pick: { options: [dev, uat, pre] } }
+    run: "echo shell in {env}"
+    check: "command -v sh"
+    interactive: true
+
+  - id: status
+    title: Show status
+    run: "echo all good"
+    check: "command -v sh"
+
+  - id: import
+    title: Import data
+    category: Deploy
+    params:
+      token: { input: { secret: true } }
+      note: { input: { default: "" } }
+    check: "command -v this-tool-does-not-exist-xyz"
+    run: "echo importing with token {token} note {note}"

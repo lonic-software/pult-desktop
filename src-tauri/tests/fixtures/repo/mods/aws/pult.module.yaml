@@ -1,0 +1,16 @@
+version: 1
+name: AWS Tooling
+description: Fixture module standing in for shared AWS commands
+
+commands:
+  - id: whoami
+    title: Show caller identity
+    run: "echo aws sts get-caller-identity (fixture)"
+    check: "command -v sh"
+
+  - id: deploy
+    title: Deploy stack
+    params:
+      region: { pick: { options: [eu-west-1, us-east-1] } }
+      target: { pick: { from: "echo demo-target-a; echo demo-target-b" } }
+    run: "echo deploying to {region} target {target}"
