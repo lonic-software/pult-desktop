@@ -70,13 +70,14 @@ export async function runCommand(
   _path: string,
   id: string,
   _values: Record<string, string>,
+  runId: string,
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
   const lines = MOCK_RUN_LOG[id] ?? ["running…", "done"];
   for (const text of lines) {
     await delay(180);
-    onEvent({ kind: "line", stream: "stdout", text });
+    onEvent({ kind: "line", run_id: runId, stream: "stdout", text });
   }
   await delay(120);
-  onEvent({ kind: "exit", code: 0 });
+  onEvent({ kind: "exit", run_id: runId, code: 0 });
 }

@@ -40,13 +40,17 @@ export async function runCommand(
   path: string,
   id: string,
   values: Record<string, string>,
+  runId: string,
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
+  // The event channel is shared across every in-flight run, so filter to
+  // this call's own run_id — otherwise a concurrent run's output would leak
+  // into this one's output pane (see RunEvent's doc comment in types.ts).
   const unlisten = await listen<RunEvent>("pult://run-output", (event) => {
-    onEvent(event.payload);
+    if (event.payload.run_id === runId) onEvent(event.payload);
   });
   try {
-    await invoke<void>("run_command", { path, id, values });
+    await invoke<void>("run_command", { path, id, runId, values });
   } finally {
     unlisten();
   }
