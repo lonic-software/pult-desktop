@@ -61,8 +61,12 @@
     gap: var(--space-2);
     text-align: left;
     padding: var(--space-4);
-    background: var(--panel);
-    border: 1px solid var(--line);
+    /* Recessed into the module: the group panel already carries the panel
+       surface + hairline border, so a permanent border here would nest a
+       box inside a box. bg (vs. the panel's --panel) reads as a shallow
+       slot instead — the border only shows up as an interactive cue. */
+    background: var(--bg);
+    border: 1px solid transparent;
     border-radius: var(--radius-panel);
     color: var(--ink);
     min-width: 0;

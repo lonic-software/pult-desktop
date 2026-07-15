@@ -112,17 +112,23 @@ load or a doctor refresh, lamps power on with a 40ms-per-row stagger
 
 ## Layout
 
-**Board home** replaces the old permanent sidebar. One section per display
-group (same grouping rule as always — see below), headed by the silkscreen
-label. Each section is a card grid — `repeat(auto-fill, minmax(240px, 1fr))`,
-16px gaps. A card is a panel with a hairline border and 10px radius:
-readiness lamp + title on the first line;
-an optional 1–2 sentence description (`description`, an additive field —
-absent/null renders a deliberate title-only card, not a bug); a Plex Mono
-footer with the command id and, right-aligned, either `terminal-only` (an
-`interactive` command) or a param count. A card is a single focusable
-button (tab + Enter, amber focus ring); hovering shifts the border toward
-`--ink`. A command currently running shows a slim indeterminate amber strip
+**Board home** replaces the old permanent sidebar. Each display group (same
+grouping rule as always — see below) renders as its own bordered module —
+the silkscreen label breaks the top border (a plain `fieldset`/`legend`,
+not a positioning trick) like an engraved OSC/FILTER/ENV block on a synth
+faceplate — and modules pack left-to-right, wrapping as needed, each sized
+to its own honest width (up to 3 card columns of ~240px) rather than
+stretching to fill the row: a 1-command group is a narrow module, a
+7-command group a wide one with extra internal rows. Inside a module, cards
+drop their own border (recessed into the panel via a subtle bg-vs-panel
+contrast instead) to keep the nested-boxes look from turning muddy; the
+border returns on hover, the focus ring stays amber. A card is a panel with
+10px radius: readiness lamp + title on the first line; an optional 1–2
+sentence description (`description`, an additive field — absent/null
+renders a deliberate title-only card, not a bug); a Plex Mono footer with
+the command id and, right-aligned, either `terminal-only` (an `interactive`
+command) or a param count. A card is a single focusable button (tab +
+Enter). A command currently running shows a slim indeterminate amber strip
 along the card's bottom edge and swaps its footer marker for "Running…" —
 and that state survives navigating away, since run state lives above the
 board/run-view switch (see `src/routes/+page.svelte`), letting more than one
