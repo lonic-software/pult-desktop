@@ -17,9 +17,10 @@
     running: boolean;
     outputLines: OutputLine[];
     onRun: (values: Record<string, string>) => void;
+    onBack: () => void;
   }
 
-  let { command, trusted, doctorReport, running, outputLines, onRun }: Props = $props();
+  let { command, trusted, doctorReport, running, outputLines, onRun, onBack }: Props = $props();
 
   let values: Record<string, string> = $state({});
 
@@ -41,14 +42,25 @@
     if (running) return "Already running.";
     return null;
   });
+
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") onBack();
+  }
 </script>
 
-<div class="detail">
+<svelte:window onkeydown={onKeydown} />
+
+<div class="run-view">
+  <button type="button" class="back micro" onclick={onBack}>← Board</button>
+
   <header class="header">
     <div class="title-row">
       <Lamp state={lampState} size="lg" />
       <h1 class="title">{command.title}</h1>
     </div>
+    {#if command.description}
+      <p class="description">{command.description}</p>
+    {/if}
     <div class="meta">
       <span class="status">{label}</span>
       <span class="dot">·</span>
@@ -101,13 +113,27 @@
 </div>
 
 <style>
-  .detail {
+  .run-view {
     height: 100%;
     display: flex;
     flex-direction: column;
     padding: var(--space-6);
     gap: var(--space-4);
     overflow-y: auto;
+  }
+
+  .back {
+    align-self: flex-start;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: var(--radius-control);
+    padding: var(--space-1) var(--space-3);
+    font-size: 12px;
+  }
+
+  .back:hover {
+    border-color: var(--muted);
   }
 
   .header {
@@ -127,6 +153,13 @@
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
+  }
+
+  .description {
+    margin: 0;
+    color: var(--muted);
+    max-width: 64ch;
+    line-height: 1.5;
   }
 
   .meta {

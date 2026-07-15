@@ -14,8 +14,8 @@
   import type { CommandInfo, DoctorReport, Listing, RunEvent } from "$lib/types";
   import { groupCommands, type CommandGroup } from "$lib/grouping";
   import Toolbar from "$lib/components/Toolbar.svelte";
-  import Sidebar from "$lib/components/Sidebar.svelte";
-  import CommandDetail from "$lib/components/CommandDetail.svelte";
+  import Board from "$lib/components/Board.svelte";
+  import RunView from "$lib/components/RunView.svelte";
   import TrustModal from "$lib/components/TrustModal.svelte";
   import SettingsModal from "$lib/components/SettingsModal.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
@@ -25,11 +25,22 @@
     text: string;
   }
 
+  // One run record per command id. Kept above the board/run-view switch so
+  // running strips on the board and the run view's output pane both survive
+  // navigating back and forth, and so more than one command can be running
+  // at once (each gets its own run_id — see src/lib/types.ts's RunEvent).
+  interface RunRecord {
+    runId: string;
+    running: boolean;
+    lines: OutputLine[];
+  }
+
   let repoPath: string | null = $state(null);
   let listing: Listing | null = $state.raw<Listing | null>(null);
   let listingError: string | null = $state(null);
   let doctorReport: DoctorReport | null = $state(null);
   let selectedId: string | null = $state(null);
+  let view: "board" | "run" = $state("board");
   let showTrustModal = $state(false);
   let trustBusy = $state(false);
   let readOnly = $state(false);
@@ -38,8 +49,7 @@
   let versionInfo: string | null = $state(null);
   let search = $state("");
   let theme: "system" | "light" | "dark" = $state("system");
-  let running = $state(false);
-  let outputLines: OutputLine[] = $state([]);
+  let runs: Record<string, RunRecord> = $state({});
 
   const groups: CommandGroup[] = $derived.by(() => {
     if (!listing) return [];
@@ -59,6 +69,8 @@
   const selectedCommand = $derived(
     listing?.commands.find((c) => c.id === selectedId) ?? null,
   );
+
+  const selectedRun = $derived(selectedId ? (runs[selectedId] ?? null) : null);
 
   $effect(() => {
     applyTheme(theme);
@@ -93,7 +105,8 @@
     listing = null;
     doctorReport = null;
     selectedId = null;
-    outputLines = [];
+    view = "board";
+    runs = {};
 
     try {
       const result = await openRepo(path);
@@ -149,28 +162,45 @@
 
   function selectCommand(id: string) {
     selectedId = id;
-    outputLines = [];
+    view = "run";
+  }
+
+  function backToBoard() {
+    view = "board";
   }
 
   async function handleRun(values: Record<string, string>) {
     if (!repoPath || !selectedCommand) return;
-    running = true;
-    outputLines = [];
+    const commandId = selectedCommand.id;
+    const runId = crypto.randomUUID();
+    runs = { ...runs, [commandId]: { runId, running: true, lines: [] } };
+
+    function appendLine(line: OutputLine) {
+      const current = runs[commandId];
+      if (!current || current.runId !== runId) return;
+      runs = { ...runs, [commandId]: { ...current, lines: [...current.lines, line] } };
+    }
+
+    function finish(line: OutputLine) {
+      const current = runs[commandId];
+      if (!current || current.runId !== runId) return;
+      runs = {
+        ...runs,
+        [commandId]: { ...current, running: false, lines: [...current.lines, line] },
+      };
+    }
+
     try {
-      await runCommand(repoPath, selectedCommand.id, values, (event: RunEvent) => {
+      await runCommand(repoPath, commandId, values, runId, (event: RunEvent) => {
         if (event.kind === "line") {
-          outputLines = [...outputLines, { stream: event.stream, text: event.text }];
+          appendLine({ stream: event.stream, text: event.text });
         } else {
-          outputLines = [
-            ...outputLines,
-            { stream: "exit", text: `Exit code: ${event.code ?? "unknown"}` },
-          ];
+          finish({ stream: "exit", text: `Exit code: ${event.code ?? "unknown"}` });
         }
       });
     } catch (e) {
-      outputLines = [...outputLines, { stream: "exit", text: String(e) }];
+      finish({ stream: "exit", text: String(e) });
     }
-    running = false;
   }
 
   function openSettings() {
@@ -203,12 +233,14 @@
       }
       const mockState = params.get("mockstate");
       const forcedSelect = params.get("select");
+      const forcedSearch = params.get("search");
       if (mockState === "modal" || mockState === "trusted") {
         void (async () => {
           await handleOpenRepo();
           if (mockState === "trusted") {
             await handleTrust();
             if (forcedSelect) selectCommand(forcedSelect);
+            if (forcedSearch) search = forcedSearch;
           }
         })();
       }
@@ -239,29 +271,21 @@
           onOpenRepo={handleOpenRepo}
         />
       </div>
-    {:else}
-      <aside class="sidebar-pane">
-        <Sidebar
-          {groups}
-          {selectedId}
+    {:else if view === "run" && selectedCommand}
+      <main class="content-pane">
+        <RunView
+          command={selectedCommand}
           trusted={listing.trusted}
           {doctorReport}
-          onSelect={selectCommand}
+          running={selectedRun?.running ?? false}
+          outputLines={selectedRun?.lines ?? []}
+          onRun={handleRun}
+          onBack={backToBoard}
         />
-      </aside>
-      <main class="detail-pane">
-        {#if selectedCommand}
-          <CommandDetail
-            command={selectedCommand}
-            trusted={listing.trusted}
-            {doctorReport}
-            {running}
-            {outputLines}
-            onRun={handleRun}
-          />
-        {:else}
-          <EmptyState message="Select a command from the sidebar." />
-        {/if}
+      </main>
+    {:else}
+      <main class="content-pane">
+        <Board {groups} trusted={listing.trusted} {doctorReport} {runs} {search} onSelect={selectCommand} />
       </main>
     {/if}
   </div>
@@ -303,15 +327,7 @@
     height: 100%;
   }
 
-  .sidebar-pane {
-    width: 260px;
-    flex: none;
-    border-right: 1px solid var(--line);
-    background: var(--panel);
-    min-height: 0;
-  }
-
-  .detail-pane {
+  .content-pane {
     flex: 1;
     min-width: 0;
     min-height: 0;
