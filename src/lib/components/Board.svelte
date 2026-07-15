@@ -33,11 +33,17 @@
     return `${i * 40}ms`;
   }
 
-  // Rack layout (from the design template): the board is a rack of 150px
-  // columns, and each module spans up to 3 of them — one per card, capped —
-  // so a 1-command group is a single narrow slot and a 7-command group
-  // spans the full 3 with extra internal rows, sitting side by side like
-  // rack modules rather than stretching to fill the row.
+  // Rack layout (from the design template): the board is a rack of
+  // RACK_UNIT_PX-wide columns, and each module spans up to 3 of them — one
+  // per card, capped — so a 1-command group is a single narrow slot and a
+  // 7-command group spans the full 3 with extra internal rows, sitting side
+  // by side like rack modules rather than stretching to fill the row.
+  //
+  // The template's own mock used a 150px unit, but real command titles/ids
+  // are longer than the mock's placeholders — at 150px nearly every title
+  // and footer truncated to unreadable fragments. Widened to 184px so the
+  // board's actual content reads at a glance; real content wins over mock
+  // fidelity here.
   //
   // `grid-column: span N` is a hard request CSS Grid won't shrink on its
   // own: on a narrow window a 3-wide module would force extra implicit
@@ -47,9 +53,9 @@
   // equivalent auto-fit escape hatch, so here we measure the rack's actual
   // rendered width (via bind:clientWidth, backed by Svelte's own
   // ResizeObserver — no manual listener needed) and clamp every module's
-  // span to however many 150px columns actually fit, so narrow windows
-  // reflow instead of overflowing. Verified at 760px.
-  const RACK_UNIT_PX = 150;
+  // span to however many columns actually fit, so narrow windows reflow
+  // instead of overflowing. Verified at 760px.
+  const RACK_UNIT_PX = 200;
   const RACK_GAP_PX = 16;
   const MAX_MODULE_COLUMNS = 3;
   let rackWidth = $state(0);
@@ -69,7 +75,11 @@
         <p>No commands match{search.trim() ? ` "${search.trim()}"` : ""}.</p>
       </div>
     {:else}
-      <div class="rack" bind:clientWidth={rackWidth}>
+      <div
+        class="rack"
+        style="grid-template-columns: repeat(auto-fill, {RACK_UNIT_PX}px)"
+        bind:clientWidth={rackWidth}
+      >
         {#each groups as group (group.key)}
           {@const span = moduleSpan(group.commands.length)}
           <div class="module" style="grid-column: span {span}">
@@ -113,7 +123,8 @@
 
   .rack {
     display: grid;
-    grid-template-columns: repeat(auto-fill, 150px);
+    /* grid-template-columns is set inline from RACK_UNIT_PX — single source
+       of truth with the JS column-fit math above. */
     gap: var(--space-4);
     align-items: start;
     justify-content: start;

@@ -66,7 +66,7 @@
     border-radius: var(--radius-control);
     color: var(--ink);
     cursor: pointer;
-    min-height: 120px;
+    min-height: 138px;
     min-width: 0;
     box-shadow:
       inset 0 1px 0 var(--emboss-light),
@@ -87,17 +87,26 @@
     gap: 6px;
     min-width: 0;
     flex: 1;
-    min-height: 96px;
+    min-height: 114px;
   }
 
+  /* Single line reads best, but a wrapped 2-word title (e.g. "Show status")
+     shouldn't ever ellipsize after a couple of characters — clamp to 2
+     lines instead of forcing nowrap. min-height reserves the full 2-line
+     box regardless of actual line count, so a 1-line title's card doesn't
+     sit shorter than its 2-line neighbor in the same row. */
   .title {
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 1.2;
+    min-height: 2.4em;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .desc {
@@ -122,36 +131,29 @@
     color: var(--muted);
   }
 
-  /* The rack's narrowest (1-column, 150px) modules don't leave much room
-     for both the id and the marker on one line. The id is the stable
-     identifier — like a part number — so it keeps a readable floor (at
-     least ~4 characters before ellipsis) and absorbs the available space;
-     the marker is the secondary, disposable annotation, so it's the one
-     that gives way, capped so it can never squeeze the id down to a single
-     character. flex-grow on the id also naturally pushes the marker to the
-     row's end when there's room, preserving the right-aligned look. */
+  /* At the rack's 200px unit, the marker text ("terminal-only", "N params",
+     "Running…") is short and bounded, so it never shrinks — it always
+     renders whole. The id is the one that gives way if a long id and a
+     marker can't both fit (rare at this width — verified against the
+     mocks' "terminal-only"/"shell" and "2 params"/"import" pairings), with
+     a floor so it never collapses to a single character. flex-grow on the
+     id also naturally pushes the marker to the row's end when there's
+     room, preserving the right-aligned look. */
   .id {
     flex: 1 1 auto;
-    min-width: 6ch;
+    min-width: 4ch;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .marker {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 40%;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: none;
     white-space: nowrap;
   }
 
   .running-marker {
     color: var(--accent);
-    /* Active-state feedback matters more here than the static param-count
-       marker this replaces, so it gets more room before eliding. */
-    max-width: 70%;
   }
 
   .running-strip {
