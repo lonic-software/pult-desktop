@@ -122,15 +122,16 @@
     --glow: color-mix(in srgb, var(--lamp-red) 65%, transparent);
   }
 
-  /* Tip flicker, part 1: the glow breathes (±1px blur/spread on the same
-     shadow layer built above) in steady states only. `animation-delay`
-     (see --flicker-delay above) is always positive and comfortably past
-     the 200ms illumination transition, so the animation only takes over
-     box-shadow *after* that one-time fade-in has already finished —
-     avoiding a fight between the transition and this infinite loop over
-     the same property. prefers-reduced-motion already collapses all
-     animation-duration to ~0 globally (see global.css), so this is inert
-     there without any extra guard. */
+  /* Tip flicker, part 1: the glow breathes (±2-3px blur/spread on the same
+     shadow layer built above) in steady states only, timed to swell/shrink
+     alongside the tip segment's opacity/brightness swing below.
+     `animation-delay` (see --flicker-delay above) is always positive and
+     comfortably past the 200ms illumination transition, so the animation
+     only takes over box-shadow *after* that one-time fade-in has already
+     finished — avoiding a fight between the transition and this infinite
+     loop over the same property. prefers-reduced-motion already collapses
+     all animation-duration to ~0 globally (see global.css), so this is
+     inert there without any extra guard. */
   .well.glow-ready,
   .well.glow-failed {
     animation: lamp-breathe var(--flicker-duration, 2800ms) ease-in-out infinite;
@@ -144,15 +145,25 @@
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
         0 0 11px -1px var(--glow, transparent);
     }
-    45% {
+    29% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
-        0 0 10px -1px var(--glow, transparent);
+        0 0 8px -2px var(--glow, transparent);
     }
-    70% {
+    41% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
-        0 0 12px 0px var(--glow, transparent);
+        0 0 13px 1px var(--glow, transparent);
+    }
+    60% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 8px -2px var(--glow, transparent);
+    }
+    90% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 14px 1px var(--glow, transparent);
     }
   }
 
@@ -205,11 +216,16 @@
     background: var(--muted);
   }
 
-  /* Tip flicker, part 2: opacity-only (compositor-cheap, per the brief),
-     shares the well's --flicker-duration/--flicker-delay via inheritance
-     so the tip and its glow breathe in the same phase. Irregular keyframe
-     stops (not a clean sine) read as analog current noise rather than a
-     mechanical pulse; amplitude stays inside 0.92-1.0 as specified. */
+  /* Tip flicker, part 2: opacity + a touch of brightness (still
+     compositor/GPU-cheap — filter is composited same as opacity), shares
+     the well's --flicker-duration/--flicker-delay via inheritance so the
+     tip and its glow breathe in the same phase. Irregular keyframe stops
+     (not a clean sine) read as analog current noise rather than a
+     mechanical pulse: a main swing down to ~0.75, a brief (<120ms even at
+     the top of the 2.2-3.4s duration range) deeper dip to ~0.58 around
+     59-61%, and a brightness overshoot near the end so lit segments
+     visibly overshoot bright as well as dip dark — recalibrated up from an
+     initial 0.92-1.0 pass that read as imperceptible even close up. */
   .seg.tip-flicker {
     animation: lamp-tip-flicker var(--flicker-duration, 2800ms) ease-in-out infinite;
     animation-delay: var(--flicker-delay, 0ms);
@@ -219,15 +235,41 @@
     0%,
     100% {
       opacity: 1;
+      filter: brightness(1);
     }
-    30% {
-      opacity: 0.97;
-    }
-    55% {
+    16% {
       opacity: 0.92;
+      filter: brightness(1.08);
     }
-    82% {
-      opacity: 0.99;
+    29% {
+      opacity: 0.75;
+      filter: brightness(0.88);
+    }
+    41% {
+      opacity: 0.95;
+      filter: brightness(1.1);
+    }
+    50% {
+      opacity: 1;
+      filter: brightness(1);
+    }
+    59% {
+      opacity: 0.85;
+    }
+    60% {
+      opacity: 0.58;
+      filter: brightness(0.8);
+    }
+    62% {
+      opacity: 0.88;
+    }
+    76% {
+      opacity: 0.78;
+      filter: brightness(0.93);
+    }
+    90% {
+      opacity: 1;
+      filter: brightness(1.15);
     }
   }
 </style>
