@@ -5,7 +5,10 @@
 // starts untrusted so the trust modal flow is reachable. Most commands carry
 // a realistic operator-voice `description` for the board card; "status" is
 // deliberately left without one, to prove the title-only card looks
-// intentional rather than like a bug.
+// intentional rather than like a bug. Titles follow pult's authoring
+// convention (1-2 words; the description carries the explanation) — "import"
+// carries a deliberately long (4-5 line) description to exercise the card's
+// hover/focus tooltip for text the 3-line clamp can't fit.
 
 import type { DoctorReport, Listing } from "../types";
 
@@ -34,7 +37,7 @@ export const mockListingUntrusted: Listing = {
   commands: [
     {
       id: "shell",
-      title: "Open a shell",
+      title: "Shell",
       origin: null,
       category: null,
       description:
@@ -46,7 +49,7 @@ export const mockListingUntrusted: Listing = {
     },
     {
       id: "status",
-      title: "Show status",
+      title: "Status",
       origin: null,
       category: null,
       // Deliberately no description — proves the title-only card looks
@@ -58,11 +61,11 @@ export const mockListingUntrusted: Listing = {
     },
     {
       id: "import",
-      title: "Import data",
+      title: "Import",
       origin: null,
       category: "Deploy",
       description:
-        "Pulls the latest export from the vendor and loads it into the local dataset. Needs a fresh access token.",
+        "Pulls the latest export from the vendor's reporting API, validates it against the local dataset's schema, and loads every changed record into place. Needs a fresh access token scoped to the export endpoint — expired or under-scoped tokens fail loudly rather than silently skipping rows.",
       params: [
         { name: "token", kind: "input", default: null, secret: true },
         { name: "note", kind: "input", default: "", secret: false },
@@ -73,7 +76,7 @@ export const mockListingUntrusted: Listing = {
     },
     {
       id: "aws:whoami",
-      title: "Show caller identity",
+      title: "Identity",
       origin: AWS_ORIGIN,
       category: null,
       description: "Prints the AWS identity pult will run subsequent commands as.",
@@ -112,16 +115,19 @@ export const mockDoctorReport: DoctorReport = {
   name: "acme-ops",
   manifest: mockListingUntrusted.manifest,
   commands: [
-    { id: "shell", title: "Open a shell", check: "command -v aws", ready: true, exit_code: 0 },
-    { id: "status", title: "Show status", check: "command -v sh", ready: true, exit_code: 0 },
+    { id: "shell", title: "Shell", check: "command -v aws", ready: true, exit_code: 0 },
+    { id: "status", title: "Status", check: "command -v sh", ready: true, exit_code: 0 },
     {
       id: "import",
-      title: "Import data",
+      title: "Import",
       check: "command -v this-tool-does-not-exist",
       ready: false,
       exit_code: 1,
     },
-    { id: "aws:whoami", title: "Show caller identity", check: "command -v aws", ready: true, exit_code: 0 },
+    { id: "aws:whoami", title: "Identity", check: "command -v aws", ready: true, exit_code: 0 },
+    // check: null / ready: null — doctor confirming there's nothing to
+    // probe, not "hasn't answered yet". Exercises the new "no-check" single
+    // neutral-gray-segment meter state (see readiness.ts).
     { id: "aws:deploy", title: "Deploy stack", check: null, ready: null, exit_code: null },
   ],
 };

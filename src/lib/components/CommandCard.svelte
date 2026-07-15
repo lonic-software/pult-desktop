@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, untrack } from "svelte";
   import type { CommandInfo, Readiness } from "../types";
   import { meterStateFor } from "../readiness";
   import Meter from "./Meter.svelte";
@@ -9,11 +10,20 @@
     running: boolean;
     staggerDelay: string;
     onSelect: () => void;
+    /** Mock-screenshot hook only — see Board.svelte's forceTooltipId. */
+    forceTooltip?: boolean;
   }
 
-  let { command, state, running, staggerDelay, onSelect }: Props = $props();
+  // Destructured as `readiness`, not `state` — a local binding literally
+  // named `state` shadows Svelte's `$state` rune with its `$store` legacy
+  // auto-subscription syntax (any `$state(...)` call would resolve as
+  // "subscribe to the local `state` store" instead), silently downgrading
+  // every `$state` field below to a plain non-reactive `let` (compiler
+  // warning: `non_reactive_update` / `store_rune_conflict`).
+  let { command, state: readiness, running, staggerDelay, onSelect, forceTooltip = false }: Props =
+    $props();
 
-  const meterState = $derived(meterStateFor(state, running));
+  const meterState = $derived(meterStateFor(readiness, running));
 
   const paramMarker = $derived.by(() => {
     if (command.interactive) return "terminal-only";
@@ -21,16 +31,123 @@
     if (n === 0) return "";
     return n === 1 ? "1 param" : `${n} params`;
   });
+
+  // Custom description tooltip: only for descriptions the 3-line clamp
+  // actually truncates (checked via scrollHeight vs clientHeight, kept in
+  // sync with a ResizeObserver since the rack reflows the card's width),
+  // shown ~500ms after a hover over the description itself or immediately
+  // on keyboard focus of the card (its one focusable button — see the
+  // README's "single focusable button" note), never via the native `title`
+  // attribute. Rendered through a body-level portal so the card's own
+  // hover `transform` (a new containing block for `position: fixed`
+  // descendants) can't throw off the fixed-viewport math.
+  const tooltipId = $derived(`desc-tooltip-${command.id}`);
+  let descEl: HTMLElement | undefined = $state();
+  let tooltipEl: HTMLElement | undefined = $state();
+  let descTruncated = $state(false);
+  let tooltipOpen = $state(false);
+  let tooltipPos = $state({ top: 0, left: 0 });
+  let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function checkTruncation() {
+    if (descEl) descTruncated = descEl.scrollHeight - descEl.clientHeight > 1;
+  }
+
+  function openTooltip() {
+    if (!descTruncated || !descEl) return;
+    const rect = descEl.getBoundingClientRect();
+    tooltipPos = { top: rect.bottom + 6, left: rect.left };
+    tooltipOpen = true;
+  }
+
+  function scheduleTooltip() {
+    if (!descTruncated) return;
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(openTooltip, 500);
+  }
+
+  function onDescLeave() {
+    if (hoverTimer) clearTimeout(hoverTimer);
+    if (!cardFocused) tooltipOpen = false;
+  }
+
+  let cardFocused = false;
+
+  function onCardFocus() {
+    cardFocused = true;
+    openTooltip();
+  }
+
+  function onCardBlur() {
+    cardFocused = false;
+    tooltipOpen = false;
+  }
+
+  // Refine the guessed position once the bubble's real size is known,
+  // flipping above the description when there isn't room below.
+  $effect(() => {
+    if (!tooltipOpen || !tooltipEl || !descEl) return;
+    const tRect = tooltipEl.getBoundingClientRect();
+    const dRect = descEl.getBoundingClientRect();
+    untrack(() => {
+      let top = dRect.bottom + 6;
+      if (top + tRect.height > window.innerHeight - 8) {
+        top = dRect.top - tRect.height - 6;
+      }
+      let left = dRect.left;
+      const maxLeft = window.innerWidth - tRect.width - 8;
+      if (left > maxLeft) left = Math.max(8, maxLeft);
+      tooltipPos = { top, left };
+    });
+  });
+
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return {
+      destroy() {
+        node.remove();
+      },
+    };
+  }
+
+  onMount(() => {
+    checkTruncation();
+    if (!descEl) return;
+    const ro = new ResizeObserver(checkTruncation);
+    ro.observe(descEl);
+    if (forceTooltip) {
+      // Mock-screenshot hook: skip the hover delay entirely.
+      queueMicrotask(() => {
+        checkTruncation();
+        openTooltip();
+      });
+    }
+    return () => ro.disconnect();
+  });
 </script>
 
-<button type="button" class="card micro" onclick={onSelect}>
+<button
+  type="button"
+  class="card micro"
+  onclick={onSelect}
+  onfocus={onCardFocus}
+  onblur={onCardBlur}
+  aria-describedby={tooltipOpen ? tooltipId : undefined}
+>
   <Meter state={meterState} {staggerDelay} />
 
   <div class="content">
     <span class="title">{command.title}</span>
 
     {#if command.description}
-      <p class="desc">{command.description}</p>
+      <p
+        class="desc"
+        bind:this={descEl}
+        onmouseenter={scheduleTooltip}
+        onmouseleave={onDescLeave}
+      >
+        {command.description}
+      </p>
     {/if}
 
     <div class="footer mono">
@@ -51,6 +168,19 @@
   {/if}
 </button>
 
+{#if tooltipOpen && command.description}
+  <div
+    class="desc-tooltip"
+    id={tooltipId}
+    role="tooltip"
+    use:portal
+    bind:this={tooltipEl}
+    style="top: {tooltipPos.top}px; left: {tooltipPos.left}px"
+  >
+    {command.description}
+  </div>
+{/if}
+
 <style>
   /* A pressable pad: raised at rest (emboss highlight + soft drop shadow),
      pressed on hover/active (nudges down 1px, shadow flattens). */
@@ -66,7 +196,7 @@
     border-radius: var(--radius-control);
     color: var(--ink);
     cursor: pointer;
-    min-height: 138px;
+    min-height: 134px;
     min-width: 0;
     box-shadow:
       inset 0 1px 0 var(--emboss-light),
@@ -87,36 +217,33 @@
     gap: 6px;
     min-width: 0;
     flex: 1;
-    min-height: 114px;
+    min-height: 108px;
   }
 
-  /* Single line reads best, but a wrapped 2-word title (e.g. "Show status")
-     shouldn't ever ellipsize after a couple of characters — clamp to 2
-     lines instead of forcing nowrap. min-height reserves the full 2-line
-     box regardless of actual line count, so a 1-line title's card doesn't
-     sit shorter than its 2-line neighbor in the same row. */
+  /* Titles are the short (1-2 word) side of pult's authoring convention —
+     the description carries the explanation — so a single line with an
+     ellipsis fallback is enough; no reserved 2-line box needed anymore. */
   .title {
     font-size: 15px;
     font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 1.2;
-    min-height: 2.4em;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    -webkit-box-orient: vertical;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
+  /* 3-line clamp (was 2) — the space reclaimed from the title's old 2-line
+     reserve. Overflow beyond 3 lines surfaces via the custom tooltip above,
+     not silently. */
   .desc {
     margin: 0;
     font-size: 12.5px;
     color: var(--muted);
     line-height: 1.4;
     display: -webkit-box;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -184,5 +311,26 @@
     100% {
       left: 100%;
     }
+  }
+
+  /* The description tooltip: panel-styled (not a native title bubble) —
+     --panel surface, hairline border, soft shadow, capped width so long
+     descriptions wrap into a readable paragraph rather than a single long
+     line. Portaled to <body> (see the `portal` action) and positioned in
+     JS, so it floats above the whole app regardless of the card's own
+     stacking/transform context. */
+  .desc-tooltip {
+    position: fixed;
+    z-index: 1000;
+    max-width: 320px;
+    padding: 8px 10px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
+    color: var(--ink);
+    font-size: 12.5px;
+    line-height: 1.45;
+    pointer-events: none;
   }
 </style>

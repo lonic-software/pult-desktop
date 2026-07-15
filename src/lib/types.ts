@@ -74,5 +74,8 @@ export type RunEvent =
   | { kind: "line"; run_id: string; stream: "stdout" | "stderr"; text: string }
   | { kind: "exit"; run_id: string; code: number | null };
 
-/** A command's readiness lamp state, derived from doctor + trust. */
-export type Readiness = "ready" | "failed" | "none" | "untrusted";
+/** A command's readiness lamp state, derived from doctor + trust.
+ *  "no-check" is the confirmed case (doctor answered, `check:` is null) —
+ *  distinct from "none", which means "nothing known yet" (doctor hasn't
+ *  answered, or this command has no doctor entry at all). */
+export type Readiness = "ready" | "failed" | "none" | "no-check" | "untrusted";

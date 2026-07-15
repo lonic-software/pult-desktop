@@ -69,6 +69,10 @@ without manual clicking (see `onMount` in `src/routes/+page.svelte`):
 
 - `?mockstate=modal` — open the fixture repo and stop at the trust modal
 - `?mockstate=trusted` — open and trust it, landing on the board
+- `?mockstate=untrusted` — open the fixture repo and dismiss the trust modal
+  (as if "Not now" were clicked), landing on the read-only board itself,
+  still untrusted — for a clean all-dark-meters screenshot without the
+  modal sitting on top
 - `?select=<command-id>` — additionally open a command's run view (with `trusted`)
 - `?search=<query>` — additionally filter the board (with `trusted`)
 - `?run=<command-id>` — additionally kick off a mock run in the background
@@ -76,6 +80,8 @@ without manual clicking (see `onMount` in `src/routes/+page.svelte`):
   screenshot catch a card mid-run (amber meter, running strip); combine
   with a short wait after page load, since the run completes on its own
   mock timers (see `handleRun` in `src/routes/+page.svelte`)
+- `?tooltip=<command-id>` — force that card's description tooltip open on
+  mount (skipping the real hover delay), for scripting a tooltip screenshot
 - `?theme=light|dark` — force a theme regardless of OS preference
 
 These are inert outside `VITE_MOCK=1`. Used to script the canonical
@@ -131,12 +137,33 @@ too (see `static/fonts/LICENSE-IBMPlex{Sans,Mono}.txt`, SIL OFL).
 
 The signature element is the **segmented LED meter** (replacing an earlier
 round lamp): five vertical segments recessed into a dark well, lit
-bottom-up — 4 green for a passing `check:`, 5 red for a failing one, 3 amber
-(with a matching glow) while a command is actively running, all unlit for
-"no check" or "untrusted." Running always wins over the last known
-readiness. On first load or a doctor refresh, meters power on with a
-40ms-per-row stagger (capped at 24 rows); `prefers-reduced-motion` collapses
-this — and the running strip's sweep animation — to instant.
+bottom-up. State → segments:
+
+| State | Segments | Glow |
+|---|---|---|
+| Untrusted | none lit | none — a dark board reads as "nothing known yet," not broken |
+| Trusted, no `check:` declared | 1, neutral gray (`--muted`) | none — "powered, no probe" |
+| Ready (`check:` passing) | 4, green | yes |
+| Check failed | 5, red | yes |
+| Running | 3, amber | yes |
+
+Running always wins over the last known readiness. The single gray segment
+is a deliberate third state, not a dimmer "off": it's only reachable once
+trust and doctor both agree there's genuinely no `check:` to run, and its
+gray (`--muted`) is chosen specifically to read as *lit* against `--seg-off`
+in both themes — darker than `--seg-off` in light mode, lighter than it in
+dark mode, the same relationship colored segments have to it.
+
+The well itself (dark recess, chrome, unlit segments) renders immediately
+with the card and never animates — a doctor-latency gap should look like
+dark hardware waiting for power, not missing UI. Only the *illumination*
+animates: when doctor state arrives or trust flips, newly-lit segments
+transition off→color (with the glow fading in alongside) with a
+40ms-per-row stagger (capped at 24 rows), 200ms per meter; a later doctor
+refresh only animates the meters whose state actually changed, since
+unchanged segments have nothing to transition. `prefers-reduced-motion`
+collapses all of this — and the running strip's sweep animation — to
+instant.
 
 ## Layout
 
@@ -159,14 +186,21 @@ reflow instead of overflowing.
 Inside a module, cards are pressable pads (`--pad` surface, emboss
 highlight, drop shadow, 6px radius) that nudge down 1px with a flattened
 shadow on hover/active — a physical press, not just a border change. Each
-pad: a segmented LED meter on the left, then title (15/600, nowrap-
-ellipsis), an optional 1–2 sentence description (`description`, an
-additive field — absent/null renders a deliberate title-only card, not a
-bug, 2-line clamp otherwise), and a Plex Mono footer with the command id
-and, when relevant, either `terminal-only` (an `interactive` command) or a
-param count — the id keeps a readable floor and the marker gives way first,
-since the narrowest rack modules don't leave much room for both. A pad is a
-single focusable button (tab + Enter, amber focus ring). A command
+pad: a segmented LED meter on the left, then a short title (pult's
+authoring convention is 1-2 words — nowrap-ellipsis, single line, no
+reserved 2-line box), an optional description (`description`, an additive
+field — absent/null renders a deliberate title-only card, not a bug,
+3-line clamp otherwise) carrying the actual explanation, and a Plex Mono
+footer with the command id and, when relevant, either `terminal-only` (an
+`interactive` command) or a param count — the id keeps a readable floor and
+the marker gives way first, since the narrowest rack modules don't leave
+much room for both. A description long enough that the 3-line clamp still
+truncates it gets a custom tooltip on hover (after a short delay) or
+keyboard focus — a small `--panel`-styled bubble (hairline border, soft
+shadow, capped width), positioned to flip above/below so it never clips at
+the viewport edge, rendered only when the text actually overflows (never
+the native `title` attribute). A pad is a single focusable button (tab +
+Enter, amber focus ring). A command
 currently running shows a slim indeterminate amber strip along the pad's
 bottom edge and swaps its footer marker for "Running…" (given more room
 than the static marker it replaces) — and that state survives navigating
@@ -264,8 +298,12 @@ Mock-mode UI screenshots are the other half of manual verification — see
 "Mock mode" above for the URL params used to script them. The current
 canonical set (faceplate system, 1200×760 unless noted):
 
-- `faceplate2-light.png` — `?mockstate=trusted&theme=light`
-- `faceplate2-dark.png` — `?mockstate=trusted&theme=dark`
+- `faceplate3-light.png` — `?mockstate=trusted&theme=light`
+- `faceplate3-dark.png` — `?mockstate=trusted&theme=dark`
+- `faceplate3-untrusted.png` — `?mockstate=untrusted&theme=light` — the
+  all-dark board (nothing lit, no glow anywhere)
+- `faceplate3-tooltip.png` — `?mockstate=trusted&theme=light&tooltip=import` —
+  the "import" card's overflowing description tooltip open
 - `faceplate2-running.png` — `?mockstate=trusted&theme=light&run=<command-id>`,
   screenshotted shortly after load so the run is still in flight
 - `faceplate2-narrow.png` — same as light, at 760px wide

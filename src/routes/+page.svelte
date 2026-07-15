@@ -50,6 +50,9 @@
   let search = $state("");
   let theme: "system" | "light" | "dark" = $state("system");
   let runs: Record<string, RunRecord> = $state({});
+  // `?tooltip=<command-id>` mock-screenshot hook — see Board.svelte's
+  // forceTooltipId and CommandCard.svelte's forceTooltip.
+  let forceTooltipId: string | null = $state(null);
 
   const groups: CommandGroup[] = $derived.by(() => {
     if (!listing) return [];
@@ -234,7 +237,9 @@
       const forcedSelect = params.get("select");
       const forcedSearch = params.get("search");
       const forcedRun = params.get("run");
-      if (mockState === "modal" || mockState === "trusted") {
+      const forcedTooltip = params.get("tooltip");
+      if (forcedTooltip) forceTooltipId = forcedTooltip;
+      if (mockState === "modal" || mockState === "trusted" || mockState === "untrusted") {
         void (async () => {
           await handleOpenRepo();
           if (mockState === "trusted") {
@@ -246,6 +251,11 @@
             // mid-run (running strip + amber meter) — see "Mock mode" in
             // the README.
             if (forcedRun) void handleRun(forcedRun, {});
+          } else if (mockState === "untrusted") {
+            // Dismiss the trust modal (as if the user clicked "Not now")
+            // to land on the read-only board itself, all dark — the modal
+            // would otherwise sit on top of it for every screenshot.
+            handleNotNow();
           }
         })();
       }
@@ -290,7 +300,15 @@
       </main>
     {:else}
       <main class="content-pane">
-        <Board {groups} trusted={listing.trusted} {doctorReport} {runs} {search} onSelect={selectCommand} />
+        <Board
+          {groups}
+          trusted={listing.trusted}
+          {doctorReport}
+          {runs}
+          {search}
+          {forceTooltipId}
+          onSelect={selectCommand}
+        />
       </main>
     {/if}
   </div>

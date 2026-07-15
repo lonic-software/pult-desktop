@@ -16,9 +16,15 @@
     runs: Record<string, RunRecord>;
     search: string;
     onSelect: (id: string) => void;
+    /** Mock-screenshot hook only (`?tooltip=<command-id>`, see routes'
+     *  onMount): forces that one card's description tooltip open on mount,
+     *  instead of requiring a real 500ms hover to script the shot. Inert
+     *  (undefined) outside VITE_MOCK. */
+    forceTooltipId?: string | null;
   }
 
-  let { groups, trusted, doctorReport, runs, search, onSelect }: Props = $props();
+  let { groups, trusted, doctorReport, runs, search, onSelect, forceTooltipId = null }: Props =
+    $props();
 
   // Row-major power-on stagger across the whole board (not per-module) —
   // now staggers the meters' appearance rather than the old round lamp's.
@@ -68,48 +74,47 @@
   }
 </script>
 
-{#key doctorReport}
-  <div class="board">
-    {#if groups.length === 0}
-      <div class="no-matches">
-        <p>No commands match{search.trim() ? ` "${search.trim()}"` : ""}.</p>
-      </div>
-    {:else}
-      <div
-        class="rack"
-        style="grid-template-columns: repeat(auto-fill, {RACK_UNIT_PX}px)"
-        bind:clientWidth={rackWidth}
-      >
-        {#each groups as group (group.key)}
-          {@const span = moduleSpan(group.commands.length)}
-          <div class="module" style="grid-column: span {span}">
-            <span class="screw screw-tl" aria-hidden="true"></span>
-            <span class="screw screw-tr" aria-hidden="true"></span>
-            <span class="screw screw-bl" aria-hidden="true"></span>
-            <span class="screw screw-br" aria-hidden="true"></span>
+<div class="board">
+  {#if groups.length === 0}
+    <div class="no-matches">
+      <p>No commands match{search.trim() ? ` "${search.trim()}"` : ""}.</p>
+    </div>
+  {:else}
+    <div
+      class="rack"
+      style="grid-template-columns: repeat(auto-fill, {RACK_UNIT_PX}px)"
+      bind:clientWidth={rackWidth}
+    >
+      {#each groups as group (group.key)}
+        {@const span = moduleSpan(group.commands.length)}
+        <div class="module" style="grid-column: span {span}">
+          <span class="screw screw-tl" aria-hidden="true"></span>
+          <span class="screw screw-tr" aria-hidden="true"></span>
+          <span class="screw screw-bl" aria-hidden="true"></span>
+          <span class="screw screw-br" aria-hidden="true"></span>
 
-            <div class="module-label-row">
-              <span class="module-label">{group.label}</span>
-            </div>
-
-            <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
-              {#each group.commands as cmd (cmd.id)}
-                {@const state = readinessFor(cmd, trusted, doctorReport)}
-                <CommandCard
-                  command={cmd}
-                  {state}
-                  running={runs[cmd.id]?.running ?? false}
-                  staggerDelay={staggerDelay(cmd.id)}
-                  onSelect={() => onSelect(cmd.id)}
-                />
-              {/each}
-            </div>
+          <div class="module-label-row">
+            <span class="module-label">{group.label}</span>
           </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
-{/key}
+
+          <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
+            {#each group.commands as cmd (cmd.id)}
+              {@const state = readinessFor(cmd, trusted, doctorReport)}
+              <CommandCard
+                command={cmd}
+                {state}
+                running={runs[cmd.id]?.running ?? false}
+                staggerDelay={staggerDelay(cmd.id)}
+                forceTooltip={forceTooltipId === cmd.id}
+                onSelect={() => onSelect(cmd.id)}
+              />
+            {/each}
+          </div>
+        </div>
+      {/each}
+    </div>
+  {/if}
+</div>
 
 <style>
   .board {
