@@ -35,9 +35,33 @@
   // Running has its own sweep animation already; the single no-check
   // segment means "no signal," so it stays put. Index is bottom-up (see
   // `segments` above), so the top lit segment is always `litCount - 1`.
+  // LEDs are fixed hardware — nothing ever translates — so the "level
+  // wobbles up and down" impression is built from two independent loops
+  // layered on this tip segment (and its neighbors), not one. A fast loop
+  // (`.seg.tip-flicker`'s own opacity/filter keyframes, `--flicker-*`
+  // below) is pure signal-noise texture — sub-second shimmer with no
+  // narrative. A slower loop (`--level-*` below) carries the actual
+  // "level" events: the tip occasionally sags (see the tip's dip overlay)
+  // in the same instant the segment directly below it dims a touch too
+  // (see `subTipIndex`/`.seg.sub-tip`), so the top of the column reads as
+  // sagging together — and, for `ready` only, the unlit segment above the
+  // tip catches a decorrelated overshoot glimmer (see `overshootIndex`/
+  // `.seg.overshoot` below). Two loops at two different rates read as
+  // analog drift; cramming both into one sub-second cycle is what made the
+  // glimmer read as a mechanical ~2Hz beat instead. Neither loop ever
+  // changes which count of segments reads as lit.
   const flickerTipIndex = $derived(
     state === "ready" || state === "failed" ? litCount - 1 : -1,
   );
+
+  // The segment directly below the tip — where the slow loop's dip (see
+  // `--level-*` below) shows a faint sympathetic dim so the sag reads as
+  // the *column's* level settling, not a single flickering pixel. Bottom-
+  // up indexing (see `segments` above) means this is always the segment
+  // one below the tip; `flickerTipIndex` is only ever -1, or >=2 (litCount
+  // is 4 or 5 for the only states that set it), so no extra guard is
+  // needed beyond mirroring flickerTipIndex's own -1-when-inapplicable.
+  const subTipIndex = $derived(flickerTipIndex >= 0 ? flickerTipIndex - 1 : -1);
 
   // Deterministic per-card desync: a tiny string hash (no shared PRNG
   // state, stable across re-renders) picks a period in 0.45-0.8s and a
@@ -59,11 +83,44 @@
   const FLICKER_SETTLE_MS = 260;
   const flickerDuration = $derived(FLICKER_MIN_MS + (seedHash(seed, 0x9e3779b1) % FLICKER_RANGE_MS));
   const flickerDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % flickerDuration));
+
+  // Level events: a second, much slower seeded cycle (2.8-4.8s) carries
+  // the dip/glimmer "events" — same seedHash scheme, new salts, so this
+  // cycle's period and phase are independent of the fast texture loop
+  // above (no relationship between how fast the LED shimmers and when the
+  // level next sags or overshoots). A sub-second period was the whole
+  // problem with the old single-loop overshoot: two peaks packed into
+  // 0.45-0.8s reads as an obvious ~2Hz beat no matter how the stops are
+  // placed. A period this much longer than the fast loop, with uneven
+  // (non-equidistant) keyframe gaps on top, is what actually reads as
+  // random rather than looped.
+  const LEVEL_MIN_MS = 2800;
+  const LEVEL_RANGE_MS = 2000; // 2.8s-4.8s period
+  const levelDuration = $derived(LEVEL_MIN_MS + (seedHash(seed, 0x27d4eb2f) % LEVEL_RANGE_MS));
+  // Dip delay: shared verbatim by the tip's dip overlay and the sub-tip's
+  // dim overlay (see `.seg.tip-flicker::after` / `.seg.sub-tip::after`
+  // below) — they need to land in the exact same instant for the sag to
+  // read as one column-level event rather than two coincidentally-timed
+  // ones, so there is deliberately only one delay for both.
+  const levelDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x165667b1) % levelDuration));
+  // The overshoot glimmer (see `.seg.overshoot` below) rides the same
+  // --level-duration as the dip so they share one slow signal, but gets
+  // its own seeded delay on that duration — peaking in lockstep with the
+  // dip looked like a mechanical seesaw rather than analog overshoot (the
+  // same reason the old fast-loop version used a second delay), so a
+  // second, independently-seeded phase decorrelates the two.
+  const levelDelay2 = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0xd3a2646c) % levelDuration));
+
+  // `ready` is the only steady state with a segment above its tip to
+  // glimmer into (failed's tip is already the top of the 5-segment well —
+  // see the LIT_COUNT/flickerTipIndex comments above). Bottom-up indexing
+  // means that segment is exactly `litCount`.
+  const overshootIndex = $derived(state === "ready" ? litCount : -1);
 </script>
 
 <div
   class="well {size} glow-{state}"
-  style="--meter-delay: {staggerDelay}; --flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms"
+  style="--meter-delay: {staggerDelay}; --flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms"
   aria-hidden="true"
 >
   <div class="segments">
@@ -75,6 +132,8 @@
         class:lit-failed={lit && state === "failed"}
         class:lit-no-check={lit && state === "no-check"}
         class:tip-flicker={i === flickerTipIndex}
+        class:sub-tip={i === subTipIndex}
+        class:overshoot={i === overshootIndex}
       ></span>
     {/each}
   </div>
@@ -201,6 +260,8 @@
   }
 
   .seg {
+    position: relative; /* containing block for the ::after overlays below
+    (.seg.tip-flicker, .seg.sub-tip, .seg.overshoot) */
     flex: 1;
     border-radius: 1.5px;
     background: var(--seg-off);
@@ -242,10 +303,16 @@
      at uneven values, held via `steps(1, end)` instead of eased, read as
      signal noise/texture rather than breathing — at a 0.45-0.8s period the
      eye integrates this as shimmer, not a visible swell. Amplitude is
-     deliberately shallow (opacity floor 0.86, brightness 0.92-1.08): a fast
+     deliberately shallow throughout (0.86-1, brightness 0.92-1.08): a fast
      *and* deep dip reads as a strobe/malfunction, not texture, so this
-     pulled back from an earlier 2.2-3.4s/0.58-floor pass that was tuned for
-     a much slower cycle. */
+     pulled back from an earlier 2.2-3.4s/0.58-floor pass that was tuned
+     for a much slower cycle. This loop is texture only now — it used to
+     also carry a single deeper 78% stop standing in for the "level"
+     undershooting, but packing a level *event* into a sub-second period
+     read as a mechanical beat once there was a second, similarly-fast
+     event (the overshoot glimmer) layered on top; both moved out to the
+     slow `--level-*` loop below, which is what `.seg.tip-flicker::after`
+     drives. */
   .seg.tip-flicker {
     animation: lamp-tip-flicker var(--flicker-duration, 600ms) steps(1, end) infinite;
     animation-delay: var(--flicker-delay, 0ms);
@@ -284,6 +351,169 @@
     89% {
       opacity: 0.98;
       filter: brightness(1.06);
+    }
+  }
+
+  /* Level events, part 1 — the dip: the tip segment already runs the fast
+     noise loop above as its own opacity/filter animation, so a second
+     animation competing for the same two properties would just overwrite
+     the first (CSS animations don't compose on shared properties — last
+     one applied wins, they don't blend). Layering the slow dip on its own
+     `::after` overlay instead — a dark tint painted over the tip, opacity-
+     only, animated independently — sidesteps that conflict entirely and
+     keeps both loops compositor-cheap (opacity is the only animated
+     property on the overlay; the tip element underneath still only
+     animates opacity/filter itself). At rest the overlay is fully
+     transparent, so it never darkens the resting/reduced-motion frame.
+
+     Two brief, uneven events per `--level-duration` cycle (24%-27% and
+     60%-63% — chosen clear of the glimmer's 9/41/78 stops on the
+     `overshoot` overlay below, so a dip and a glimmer never read as the
+     same event) held via `steps(1, end)`, each ~3% of the cycle
+     (~84-144ms across the 2.8-4.8s duration range) — long enough to
+     register as a sag, short enough to stay texture rather than a state
+     change. Peak opacity 0.55/0.5 of this dark overlay reads as the tip
+     sagging to roughly half brightness. Shares `--level-duration` and
+     `--level-delay` — not `--level-delay-2` — with `.seg.sub-tip::after`
+     below so the two dim in the exact same instants; see the `levelDelay`
+     comment in the script block for why they're deliberately not
+     decorrelated the way the overshoot is. */
+  .seg.tip-flicker::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: #000;
+    opacity: 0;
+    animation: lamp-level-dip-tip var(--level-duration, 3600ms) steps(1, end) infinite;
+    animation-delay: var(--level-delay, 0ms);
+  }
+
+  @keyframes lamp-level-dip-tip {
+    0%,
+    100% {
+      opacity: 0;
+    }
+    24% {
+      opacity: 0.55;
+    }
+    27% {
+      opacity: 0;
+    }
+    60% {
+      opacity: 0.5;
+    }
+    63% {
+      opacity: 0;
+    }
+  }
+
+  /* Level events, part 2 — the sympathetic dim: the segment directly below
+     the tip (`subTipIndex`) is steadily lit the whole time — this must
+     never read as a second flickering tip, just a faint accomplice to the
+     sag above it. Same overlay trick as the tip's dip (dark ::after,
+     opacity-only, transparent at rest) but shallower — 0.2 peak versus the
+     tip's 0.5-0.55 — so it reads as "dims to ~0.8," clearly still lit, not
+     as its own event. Identical keyframe stops (24%/27%, 60%/63%) and the
+     same `--level-duration`/`--level-delay` as `.seg.tip-flicker::after`
+     — deliberately the *same* delay, not a second seeded one — so the two
+     overlays turn on and off in the same frame and the top of the column
+     visibly sags as one unit rather than two coincidentally-timed ones. */
+  .seg.sub-tip::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: #000;
+    opacity: 0;
+    animation: lamp-level-dim-sub-tip var(--level-duration, 3600ms) steps(1, end) infinite;
+    animation-delay: var(--level-delay, 0ms);
+  }
+
+  @keyframes lamp-level-dim-sub-tip {
+    0%,
+    100% {
+      opacity: 0;
+    }
+    24% {
+      opacity: 0.2;
+    }
+    27% {
+      opacity: 0;
+    }
+    60% {
+      opacity: 0.2;
+    }
+    63% {
+      opacity: 0;
+    }
+  }
+
+  /* Level events, part 3 — overshoot: the segment directly above a `ready`
+     tip (see `overshootIndex`) is never lit (LIT_COUNT never changes), but
+     it can catch a faint, brief glimmer — the analog equivalent of a VU
+     meter's next LED catching a transient. `failed` has no segment above
+     its tip (5 lit is the top of the 5-segment well) so it never gets this
+     class; per the design there is no undershoot-only case that also
+     invents a 6th level.
+
+     This segment's own `background` stays `--seg-off` for its whole
+     lifetime (it is not, and must never look like, a steadily-lit 5th
+     segment) — the glimmer is painted on a `::after` overlay instead, pre-
+     colored in the lit green and driven purely by `opacity`. That keeps
+     every animated property here compositor-cheap (opacity only, same
+     tier as the tip's opacity/filter above) without ever touching
+     `background-color`, which is not compositor-cheap and was rejected for
+     that reason even though it would have been simpler.
+
+     This used to ride the fast --flicker-duration loop (two peaks per
+     0.45-0.8s cycle), which read as an obvious, rhythmic ~2Hz beat no
+     matter how the stops were tuned — two events on a sub-second period
+     are always close enough together for the eye to lock onto the gap
+     between them. Moving it to the slow --level-duration loop (2.8-4.8s)
+     fixes that on its own, but the fix that actually sells "random" is the
+     *uneven* spacing on top: three brief spikes at 9%/41%/78% — gaps of
+     9/32/37/22 points, deliberately dissimilar, not the evenly-spaced
+     thirds a looped signal would fall into. Each spike is ~3% of the cycle
+     (~84-144ms across the duration range, matching the dip's brevity) and
+     peaks at a slightly different opacity (0.25/0.3/0.22) so no two events
+     look identical either. Uses the independently-seeded --level-delay-2
+     (not --level-delay) so these peaks don't land in lockstep with the
+     tip/sub-tip dip above — see the `levelDelay2` comment in the script
+     block. */
+  .seg.overshoot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--lamp-green);
+    opacity: 0;
+    animation: lamp-level-glimmer var(--level-duration, 3600ms) steps(1, end) infinite;
+    animation-delay: var(--level-delay-2, var(--level-delay, 0ms));
+  }
+
+  @keyframes lamp-level-glimmer {
+    0%,
+    100% {
+      opacity: 0;
+    }
+    9% {
+      opacity: 0.25;
+    }
+    12% {
+      opacity: 0;
+    }
+    41% {
+      opacity: 0.3;
+    }
+    44% {
+      opacity: 0;
+    }
+    78% {
+      opacity: 0.22;
+    }
+    81% {
+      opacity: 0;
     }
   }
 </style>

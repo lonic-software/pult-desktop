@@ -67,7 +67,15 @@ code,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * {
+  /* The bare `*` universal selector does not match generated ::before/
+     ::after boxes (verified: Chrome leaves a pseudo-element's own
+     animation-duration untouched by a plain `*` rule), so anything that
+     drives a loop off a ::before/::after overlay — e.g. Meter.svelte's LED
+     glimmer/dip overlays — needs the pseudo-elements listed explicitly or
+     they keep animating at full speed under reduced motion. */
+  *,
+  *::before,
+  *::after {
     transition-duration: 0.001ms !important;
     animation-duration: 0.001ms !important;
   }
