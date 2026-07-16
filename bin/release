@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Cut a release: preflight → the check gate → bump the version everywhere →
+# commit → tag → push. Pushing the v* tag triggers
+# .github/workflows/release.yml, which builds the macOS/Linux/Windows
+# installer matrix and publishes the assets to a DRAFT GitHub release —
+# someone still has to open
+# https://github.com/lonic-software/pult-desktop/releases and publish it.
+#
+# The version lives in three places that must stay in lockstep —
+# package.json, src-tauri/tauri.conf.json, and src-tauri/Cargo.toml (plus
+# its Cargo.lock entry) — which is exactly why doing this by hand is
+# error-prone. This bumps all three, then refreshes the lock file.
+#
+# All safety checks run before anything is mutated, so a failed precondition
+# never leaves partial state behind.
+#
+# usage: release <version> [--dry-run]
+#   <version>   x.y.z (a leading v is tolerated)
+#   --dry-run   run every check and the version bump, show the diff, then
+#               revert — no commit, tag, or push
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+version=${1:?usage: release <version> [--dry-run]}
+version=${version#v}
+dry_run=${2:-}
+
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  { echo "release: '$version' is not x.y.z" >&2; exit 1; }
+
+echo "── preflight"
+[ -z "$(git status --porcelain)" ] ||
+  { echo "release: working tree not clean — commit or stash your changes first" >&2; exit 1; }
+[ "$(git rev-parse --abbrev-ref HEAD)" = main ] ||
+  { echo "release: not on main (currently on $(git rev-parse --abbrev-ref HEAD))" >&2; exit 1; }
+git fetch --tags origin main
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] ||
+  { echo "release: main is not in sync with origin/main — pull or push first" >&2; exit 1; }
+! git rev-parse --verify --quiet "refs/tags/v$version" >/dev/null ||
+  { echo "release: tag v$version already exists" >&2; exit 1; }
+
+./bin/check
+
+echo "── bump to $version"
+# Each edit asserts it changed exactly one line, so a moved or renamed
+# version field fails loudly instead of silently leaving a file un-bumped.
+V="$version" perl -pi -e '
+  s/^(\s*"version":\s*")[^"]*(",)$/$1$ENV{V}$2/ and $n++;
+  END { $n == 1 or die "package.json: expected 1 version line, got $n\n" }
+' package.json
+V="$version" perl -pi -e '
+  s/^(\s*"version":\s*")[^"]*(",)$/$1$ENV{V}$2/ and $n++;
+  END { $n == 1 or die "src-tauri/tauri.conf.json: expected 1 version line, got $n\n" }
+' src-tauri/tauri.conf.json
+V="$version" perl -pi -e '
+  s/^(version = ")[^"]*(")$/$1$ENV{V}$2/ and $n++;
+  END { $n == 1 or die "src-tauri/Cargo.toml: expected 1 [package] version line, got $n\n" }
+' src-tauri/Cargo.toml
+
+echo "── refresh Cargo.lock"
+( cd src-tauri && cargo check --quiet )
+
+files="package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock"
+# shellcheck disable=SC2086
+git --no-pager diff --stat -- $files
+
+if [ "$dry_run" = "--dry-run" ]; then
+  # shellcheck disable=SC2086
+  git checkout -- $files
+  echo "release: dry run — reverted the bump; would have released v$version"
+  exit 0
+fi
+
+echo "── commit, tag, push"
+# shellcheck disable=SC2086
+git add $files
+git commit -m "v$version"
+git tag "v$version"
+git push origin main "v$version"
+
+echo
+echo "release: v$version pushed — CI is building the installers:"
+echo "  https://github.com/lonic-software/pult-desktop/actions"
+echo
+echo "when it finishes, the release it created is a DRAFT — review it and"
+echo "publish it yourself:"
+echo "  https://github.com/lonic-software/pult-desktop/releases"

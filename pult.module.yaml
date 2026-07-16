@@ -1,0 +1,18 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lonic-software/pult/v0.4.0/pult.schema.json
+# pult module — run it without cloning:  pult x github.com/lonic-software/pult-desktop install
+# Authoring guide: https://github.com/lonic-software/pult/blob/v0.4.0/docs/authoring.md
+version: 1
+name: pult-desktop
+description: Install pult-desktop from the latest published release (macOS, Linux, Windows).
+
+commands:
+  - id: install
+    title: Install pult-desktop from the latest release
+    description: >-
+      Downloads and installs the right build for your OS and architecture,
+      then prints setup notes (PATH, macOS Gatekeeper). See ./bin/install,
+      ./install.sh, and ./install.ps1.
+    check: "command -v curl"
+    # One entry point; bin/install picks install.sh (macOS/Linux) or, on
+    # Windows, install.ps1 (native NSIS setup + persistent PATH).
+    run: "${module.dir}/bin/install"

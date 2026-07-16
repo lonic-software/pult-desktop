@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lonic-software/pult/v0.4.0/pult.schema.json
+# pult manifest — the operational commands for pult-desktop maintainers.
+# Authoring guide: https://github.com/lonic-software/pult/blob/v0.4.0/docs/authoring.md
+#
+# Run `pult` for the guided menu, or `pult <id>` directly. Real logic lives
+# in ./bin — these are one-liners that call it.
+version: 1
+name: pult-desktop
+
+includes:
+  # Surfaces the module's `install` here too, so `pult install` works for a
+  # maintainer's own checkout and `pult x github.com/lonic-software/pult-desktop
+  # install` works for everyone else, from one definition — the pattern
+  # pult's own authoring guide recommends for "a command you also use
+  # locally" (docs/authoring.md §3, "Exposing a command that you also use
+  # locally"). pult.yaml and pult.module.yaml stay separate files on
+  # purpose: this repo's internal commands (release, check, …) never leak
+  # into what a stranger running `pult x` can see.
+  - source: ./pult.module.yaml
+
+commands:
+  - id: dev
+    title: Run the app in dev mode (Vite + Tauri, hot reload)
+    description: >-
+      Starts the Tauri dev server. It blocks until you Ctrl+C, and pult-desktop
+      has no pty runner yet (see README "Next steps"), so it can't run this
+      in-app — run `pult dev` from a real terminal.
+    check: "command -v npm && command -v cargo"
+    interactive: true
+    run: "npm run tauri dev"
+
+  - id: build
+    title: Build the desktop bundles for this OS (dmg / NSIS / deb / AppImage)
+    check: "command -v npm && command -v cargo"
+    run: "npm run tauri build"
+
+  - id: check
+    title: The pre-release gate — svelte-check, frontend build, cargo test, clippy
+    description: >-
+      Exactly what `pult release` runs before it touches anything. Broader
+      than CI (ci.yml splits frontend/rust into parallel jobs and skips
+      cargo test) — this runs everything sequentially in one command.
+    check: "command -v npm && command -v cargo"
+    run: "./bin/check"
+
+  - id: test
+    title: Run the Rust tests (fast loop; forwards args to cargo test)
+    check: "command -v cargo"
+    run: "./bin/test"
+
+  - id: release
+    title: Cut a release (bump the version everywhere → commit → tag → push; CI builds a draft release)
+    description: >-
+      Bumps package.json, tauri.conf.json, and Cargo.toml/Cargo.lock, runs
+      the check gate, then commits, tags, and pushes. CI then builds the
+      installer matrix into a DRAFT GitHub release — publish it yourself
+      when you're happy with it.
+    check: "command -v git && command -v npm && command -v cargo"
+    params:
+      # next patch / minor / major from the latest v* tag; patch is the
+      # picker's default (first line of bin/release-candidates' output)
+      version: { pick: { from: "./bin/release-candidates" } }
+    run: "./bin/release {version}"

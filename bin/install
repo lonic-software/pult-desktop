@@ -1,0 +1,35 @@
+#!/bin/sh
+# pult-desktop installer entry point — `pult install` locally, or
+# `pult x github.com/lonic-software/pult-desktop install` without cloning.
+#
+# pult always runs this via a POSIX shell, so on macOS and Linux the POSIX
+# installer (install.sh) is the whole story. On Windows it hands off to
+# install.ps1, which can do things the POSIX path can't from inside Git
+# Bash: run the native NSIS setup and persist the *native* user PATH via
+# the registry.
+#
+# Honors the same PULT_DESKTOP_* environment overrides as both installers.
+set -eu
+
+# shellcheck disable=SC1007 # CDPATH= is intentional: blanks CDPATH for this cd only.
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)   # this bin/ directory
+root=$(dirname -- "$here")                           # module root (repo root)
+
+is_windows() {
+    case "${OS:-}$(uname -s 2>/dev/null || true)" in
+        *Windows_NT* | *MINGW* | *MSYS* | *CYGWIN*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if is_windows; then
+    # Prefer PowerShell 7 (pwsh); fall back to Windows PowerShell.
+    ps=pwsh
+    command -v pwsh >/dev/null 2>&1 || ps=powershell
+    script="$root/install.ps1"
+    # Hand PowerShell a native Windows path, not an MSYS one, when we can.
+    command -v cygpath >/dev/null 2>&1 && script=$(cygpath -w "$script")
+    exec "$ps" -NoProfile -ExecutionPolicy Bypass -File "$script"
+fi
+
+exec "$root/install.sh"

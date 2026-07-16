@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# The pre-release gate: everything `pult release` runs before it touches
+# anything. Broader than CI (ci.yml splits frontend/rust into two parallel
+# jobs and never runs cargo test) — this runs the whole thing sequentially
+# so a maintainer can gate a release on one command. Works on a fresh
+# clone: nothing here assumes node_modules or src-tauri/binaries exist yet.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "── npm ci"
+npm ci
+
+echo "── npm run check (svelte-check)"
+npm run check
+
+echo "── npm run build (frontend → build/)"
+npm run build
+
+echo "── fetch pult sidecar (src-tauri/binaries — tauri-build checks for it on every cargo build/check/test)"
+node scripts/fetch-pult-sidecar.mjs
+
+echo "── cargo test"
+( cd src-tauri && cargo test )
+
+echo "── cargo clippy (matches CI: --all-targets -D warnings)"
+( cd src-tauri && cargo clippy --all-targets -- -D warnings )
+
+echo "check: all green"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Fast Rust test loop — forwards any args straight to cargo test:
+#   ./bin/test                     # everything
+#   ./bin/test pult_bin::          # one module
+#   ./bin/test -- --nocapture      # cargo/libtest flags
+# Fetches the pult sidecar first — tauri-build's build script checks for it
+# on every build/check/test of the src-tauri crate (see
+# scripts/fetch-pult-sidecar.mjs and README's "Sidecar bundling"), and the
+# fetch is a no-op if it's already up to date.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "── ensuring the pult sidecar is present"
+node scripts/fetch-pult-sidecar.mjs
+
+echo "── cargo test"
+cd src-tauri
+exec cargo test "$@"

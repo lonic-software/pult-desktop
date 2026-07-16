@@ -344,6 +344,51 @@ nothing sets `TAURI_ENV_TARGET_TRIPLE` or runs the fetch hook for it — the
 `rust` job fetches the sidecar for the runner's own host triple before
 linting.
 
+## Maintaining pult-desktop with pult
+
+This repo dogfoods the tool it's a client for: `pult.yaml` declares this
+repo's own maintainer commands. Open it in pult-desktop itself, or run
+`pult` from the repo root for the guided menu (`pult --list` for the flat
+list). Real logic lives in `./bin`; the yaml is one-liners over it.
+
+- `pult dev` — `npm run tauri dev`. Declared `interactive: true`: it blocks
+  and needs Ctrl+C, and pult-desktop has no pty runner yet (see "Next
+  steps" below), so it refuses to run this one in-app — run `pult dev` from
+  a real terminal instead.
+- `pult build` — `npm run tauri build`.
+- `pult check` — the pre-release gate (`./bin/check`): `npm ci`, `npm run
+  check`, `npm run build`, fetch the pult sidecar, `cargo test`, then
+  `cargo clippy --all-targets -- -D warnings`. This is exactly what `pult
+  release` runs before it touches anything, and it's broader than CI
+  (`ci.yml` splits frontend/rust into two parallel jobs and never runs
+  `cargo test`).
+- `pult test` — fast Rust test loop (`./bin/test`), forwards args to `cargo
+  test`.
+- `pult release` — picks the next patch/minor/major version (computed from
+  the latest `v*` tag by `bin/release-candidates`), then `bin/release`
+  bumps `package.json`, `src-tauri/tauri.conf.json`, and
+  `src-tauri/Cargo.toml`/`Cargo.lock` together, runs the check gate, and
+  commits/tags/pushes. Pushing the tag triggers
+  `.github/workflows/release.yml`, which builds the four-platform installer
+  matrix into a **draft** GitHub release — CI never publishes it for you;
+  open https://github.com/lonic-software/pult-desktop/releases and publish
+  it once you're happy with the build. All the safety checks (clean tree,
+  on `main`, in sync with `origin/main`, tag doesn't already exist) run
+  before anything is bumped, and `bin/release <version> --dry-run` runs the
+  whole thing short of the commit/tag/push.
+- `pult install` — also published as a module (`pult.module.yaml`), so
+  anyone can install pult-desktop from the latest release without cloning:
+
+  ```sh
+  pult x github.com/lonic-software/pult-desktop install
+  ```
+
+  This dispatches (`bin/install`) to `install.sh` on macOS/Linux or
+  `install.ps1` on Windows. Both resolve the latest *published* release via
+  the GitHub API and error clearly if only a draft exists. The macOS path
+  installs an unsigned app (no Apple Developer account yet), so it prints
+  the Gatekeeper right-click-to-open workaround after installing.
+
 ## Next steps
 
 - **pty runner** — a real terminal surface (portable-pty or similar) so
