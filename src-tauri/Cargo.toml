@@ -1,6 +1,6 @@
 [package]
 name = "pult-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Desktop companion for pult — run repository commands through a form, not flags."
 authors = ["Lonic Software"]
 edition = "2021"
