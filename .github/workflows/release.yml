@@ -70,10 +70,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # --- macOS code signing / notarization ---
-          # No Apple Developer credentials exist yet, so macOS builds ship
-          # unsigned (Gatekeeper will warn on first launch). Once a paid
-          # Apple Developer account and certificates are available, add
-          # these repo secrets and uncomment to enable signing + notarization:
+          # No Apple Developer credentials exist yet, so macOS builds are
+          # only ad-hoc signed (bundle.macOS.signingIdentity: "-" in
+          # tauri.conf.json) — Gatekeeper will still warn on first launch
+          # (Privacy & Security > Open Anyway), just not report the bundle
+          # as damaged. Once a paid Apple Developer account and certificates
+          # are available, add these repo secrets and uncomment to enable
+          # real signing + notarization — APPLE_SIGNING_IDENTITY below
+          # overrides the "-" in tauri.conf.json, no config edit needed:
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}

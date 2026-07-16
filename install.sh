@@ -7,9 +7,10 @@
 #   • macOS  — drops pult-desktop.app into /Applications (falling back to
 #              ~/Applications if that's not writable) and installs a
 #              `pult-desktop` shim that runs `open -a` on it. The app is
-#              unsigned (no Apple Developer account yet), so Gatekeeper
-#              quarantines it on first download — this prints the
-#              right-click → Open (or xattr) workaround.
+#              ad-hoc signed but not notarized (no paid Apple Developer
+#              account yet), so Gatekeeper quarantines it on first
+#              download — this prints the Privacy & Security → Open
+#              Anyway workaround (the xattr route still works too).
 #   • Linux  — installs the portable AppImage as `pult-desktop` (plus a
 #              best-effort .desktop entry) and points out the .deb from the
 #              same release as the apt-native alternative.
@@ -141,9 +142,11 @@ EOF
     link_hint
 
     say ""
-    say "macOS note: this build is unsigned (no Apple Developer account yet),"
-    say "so Gatekeeper will refuse the first launch. Either right-click the app"
-    say "in Finder and choose Open, or clear the quarantine flag yourself:"
+    say "macOS note: this build is ad-hoc signed but not notarized (no paid"
+    say "Apple Developer account yet), so Gatekeeper will refuse the first"
+    say "launch with an \"Apple could not verify\" prompt. Open System Settings"
+    say "> Privacy & Security and click \"Open Anyway\" next to pult-desktop,"
+    say "or clear the quarantine flag yourself:"
     say "    xattr -dr com.apple.quarantine \"${dest}\""
 }
 

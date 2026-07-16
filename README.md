@@ -385,9 +385,10 @@ list). Real logic lives in `./bin`; the yaml is one-liners over it.
 
   This dispatches (`bin/install`) to `install.sh` on macOS/Linux or
   `install.ps1` on Windows. Both resolve the latest *published* release via
-  the GitHub API and error clearly if only a draft exists. The macOS path
-  installs an unsigned app (no Apple Developer account yet), so it prints
-  the Gatekeeper right-click-to-open workaround after installing.
+  the GitHub API and error clearly if only a draft exists. The macOS build
+  is ad-hoc signed (no paid Apple Developer account yet, so it's not
+  notarized), so `install.sh` prints the Gatekeeper hint — go to Privacy &
+  Security and click "Open Anyway" — after installing.
 
 ## Next steps
 
@@ -399,9 +400,12 @@ list). Real logic lives in `./bin`; the yaml is one-liners over it.
   should claim that channel itself (pult passes it through untouched when
   already set — see docs/reference.md's Events protocol) and render a live
   step/percentage indicator instead of just raw output lines.
-- **Packaging/signing** — code signing and notarization (macOS), and
-  installer generation for the other platforms, once the app is otherwise
-  stable.
+- **Packaging/signing** — the macOS bundle is ad-hoc signed
+  (`bundle.macOS.signingIdentity: "-"` in `src-tauri/tauri.conf.json`), so
+  Gatekeeper treats it as a normal unverified app (Privacy & Security →
+  Open Anyway) instead of reporting it as damaged. Real Developer ID
+  signing and notarization, plus installer generation for the other
+  platforms, are still pending a paid Apple Developer account.
 
 ## Testing notes
 
