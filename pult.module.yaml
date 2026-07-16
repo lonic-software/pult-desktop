@@ -7,7 +7,7 @@ description: Install pult-desktop from the latest published release (macOS, Linu
 
 commands:
   - id: install
-    title: Install pult-desktop
+    title: Install
     description: >-
       Downloads and installs the right build for your OS and architecture,
       then prints setup notes (PATH, macOS Gatekeeper). See ./bin/install,

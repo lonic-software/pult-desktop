@@ -20,7 +20,8 @@ includes:
 
 commands:
   - id: dev
-    title: Run the app in dev mode
+    title: Run (dev mode)
+    category: Develop
     description: >-
       Starts the Tauri dev server (Vite + Tauri, hot reload). It blocks until
       you Ctrl+C, and pult-desktop has no pty runner yet (see README "Next
@@ -31,7 +32,8 @@ commands:
     run: "npm run tauri dev"
 
   - id: build
-    title: Build the desktop bundles
+    title: Build bundles
+    category: Ship
     description: >-
       Builds the installer for this OS: dmg on macOS, NSIS on Windows, deb
       or AppImage on Linux.
@@ -39,7 +41,8 @@ commands:
     run: "npm run tauri build"
 
   - id: check
-    title: Run the pre-release gate
+    title: Run checks
+    category: Develop
     description: >-
       Runs svelte-check, the frontend build, cargo test, and clippy — exactly
       what `pult release` runs before it touches anything. Broader than CI
@@ -49,14 +52,16 @@ commands:
     run: "./bin/check"
 
   - id: test
-    title: Run the Rust tests
+    title: Run tests
+    category: Develop
     description: >-
       Fast loop over `cargo test`; forwards any extra args to it.
     check: "command -v cargo"
     run: "./bin/test"
 
   - id: release
-    title: Cut a release
+    title: Release
+    category: Ship
     description: >-
       Bumps the version everywhere (package.json, tauri.conf.json, and
       Cargo.toml/Cargo.lock), runs the check gate, then commits, tags, and
