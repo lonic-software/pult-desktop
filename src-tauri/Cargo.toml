@@ -1,8 +1,8 @@
 [package]
 name = "pult-desktop"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Desktop companion for pult — run repository commands through a form, not flags."
+authors = ["Lonic Software"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
