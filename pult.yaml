@@ -20,41 +20,48 @@ includes:
 
 commands:
   - id: dev
-    title: Run the app in dev mode (Vite + Tauri, hot reload)
+    title: Run the app in dev mode
     description: >-
-      Starts the Tauri dev server. It blocks until you Ctrl+C, and pult-desktop
-      has no pty runner yet (see README "Next steps"), so it can't run this
-      in-app — run `pult dev` from a real terminal.
+      Starts the Tauri dev server (Vite + Tauri, hot reload). It blocks until
+      you Ctrl+C, and pult-desktop has no pty runner yet (see README "Next
+      steps"), so it can't run this in-app — run `pult dev` from a real
+      terminal.
     check: "command -v npm && command -v cargo"
     interactive: true
     run: "npm run tauri dev"
 
   - id: build
-    title: Build the desktop bundles for this OS (dmg / NSIS / deb / AppImage)
+    title: Build the desktop bundles
+    description: >-
+      Builds the installer for this OS: dmg on macOS, NSIS on Windows, deb
+      or AppImage on Linux.
     check: "command -v npm && command -v cargo"
     run: "npm run tauri build"
 
   - id: check
-    title: The pre-release gate — svelte-check, frontend build, cargo test, clippy
+    title: Run the pre-release gate
     description: >-
-      Exactly what `pult release` runs before it touches anything. Broader
-      than CI (ci.yml splits frontend/rust into parallel jobs and skips
-      cargo test) — this runs everything sequentially in one command.
+      Runs svelte-check, the frontend build, cargo test, and clippy — exactly
+      what `pult release` runs before it touches anything. Broader than CI
+      (ci.yml splits frontend/rust into parallel jobs and skips cargo test)
+      — this runs everything sequentially in one command.
     check: "command -v npm && command -v cargo"
     run: "./bin/check"
 
   - id: test
-    title: Run the Rust tests (fast loop; forwards args to cargo test)
+    title: Run the Rust tests
+    description: >-
+      Fast loop over `cargo test`; forwards any extra args to it.
     check: "command -v cargo"
     run: "./bin/test"
 
   - id: release
-    title: Cut a release (bump the version everywhere → commit → tag → push; CI builds a draft release)
+    title: Cut a release
     description: >-
-      Bumps package.json, tauri.conf.json, and Cargo.toml/Cargo.lock, runs
-      the check gate, then commits, tags, and pushes. CI then builds the
-      installer matrix into a DRAFT GitHub release — publish it yourself
-      when you're happy with it.
+      Bumps the version everywhere (package.json, tauri.conf.json, and
+      Cargo.toml/Cargo.lock), runs the check gate, then commits, tags, and
+      pushes. CI then builds the installer matrix into a DRAFT GitHub
+      release — publish it yourself when you're happy with it.
     check: "command -v git && command -v npm && command -v cargo"
     params:
       # next patch / minor / major from the latest v* tag; patch is the
