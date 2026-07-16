@@ -40,12 +40,12 @@
   );
 
   // Deterministic per-card desync: a tiny string hash (no shared PRNG
-  // state, stable across re-renders) picks a period in 2.2-3.4s and a
-  // phase within that period from the command id, so cards never breathe
+  // state, stable across re-renders) picks a period in 0.45-0.8s and a
+  // phase within that period from the command id, so cards never flicker
   // in lockstep. `FLICKER_SETTLE_MS` is a fixed head start added on top —
   // it keeps the animation's `animation-delay` comfortably past the 200ms
   // illumination transition (see the `.well` rule below) so the one-time
-  // fade-in and the infinite breathing loop never fight over the same
+  // fade-in and the infinite flicker loop never fight over the same
   // box-shadow property.
   function seedHash(s: string, salt: number): number {
     let h = salt >>> 0;
@@ -54,8 +54,8 @@
     }
     return h;
   }
-  const FLICKER_MIN_MS = 2200;
-  const FLICKER_RANGE_MS = 1200; // 2.2s-3.4s period
+  const FLICKER_MIN_MS = 450;
+  const FLICKER_RANGE_MS = 350; // 0.45s-0.8s period
   const FLICKER_SETTLE_MS = 260;
   const flickerDuration = $derived(FLICKER_MIN_MS + (seedHash(seed, 0x9e3779b1) % FLICKER_RANGE_MS));
   const flickerDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % flickerDuration));
@@ -122,19 +122,23 @@
     --glow: color-mix(in srgb, var(--lamp-red) 65%, transparent);
   }
 
-  /* Tip flicker, part 1: the glow breathes (±2-3px blur/spread on the same
-     shadow layer built above) in steady states only, timed to swell/shrink
-     alongside the tip segment's opacity/brightness swing below.
-     `animation-delay` (see --flicker-delay above) is always positive and
-     comfortably past the 200ms illumination transition, so the animation
-     only takes over box-shadow *after* that one-time fade-in has already
-     finished — avoiding a fight between the transition and this infinite
-     loop over the same property. prefers-reduced-motion already collapses
-     all animation-duration to ~0 globally (see global.css), so this is
-     inert there without any extra guard. */
+  /* Tip flicker, part 1: the glow carries a faint ripple (11-14px blur on
+     the same shadow layer built above — never dips below ~79% of its peak,
+     so the halo stays clearly visible at every frame) in steady states
+     only, phase-locked to the tip segment's opacity/brightness noise below.
+     Nine uneven keyframe stops plus `steps(1, end)` (a held value that
+     jumps to the next, no easing) read as electrical noise rather than a
+     pulse — at a sub-second period a smooth ease would still look like a
+     swell. `animation-delay` (see --flicker-delay above) is always positive
+     and comfortably past the 200ms illumination transition, so the
+     animation only takes over box-shadow *after* that one-time fade-in has
+     already finished — avoiding a fight between the transition and this
+     infinite loop over the same property. prefers-reduced-motion already
+     collapses all animation-duration to ~0 globally (see global.css), so
+     this is inert there without any extra guard. */
   .well.glow-ready,
   .well.glow-failed {
-    animation: lamp-breathe var(--flicker-duration, 2800ms) ease-in-out infinite;
+    animation: lamp-breathe var(--flicker-duration, 600ms) steps(1, end) infinite;
     animation-delay: var(--flicker-delay, 0ms);
   }
 
@@ -143,27 +147,42 @@
     100% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
-        0 0 11px -1px var(--glow, transparent);
+        0 0 14px 1px var(--glow, transparent);
     }
-    29% {
+    13% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
-        0 0 8px -2px var(--glow, transparent);
+        0 0 12px 0px var(--glow, transparent);
     }
-    41% {
+    27% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
         0 0 13px 1px var(--glow, transparent);
     }
-    60% {
+    38% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
-        0 0 8px -2px var(--glow, transparent);
+        0 0 11px 0px var(--glow, transparent);
     }
-    90% {
+    54% {
       box-shadow:
         inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
         0 0 14px 1px var(--glow, transparent);
+    }
+    63% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 12px 0px var(--glow, transparent);
+    }
+    78% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 11px 0px var(--glow, transparent);
+    }
+    89% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 13px 1px var(--glow, transparent);
     }
   }
 
@@ -219,15 +238,16 @@
   /* Tip flicker, part 2: opacity + a touch of brightness (still
      compositor/GPU-cheap — filter is composited same as opacity), shares
      the well's --flicker-duration/--flicker-delay via inheritance so the
-     tip and its glow breathe in the same phase. Irregular keyframe stops
-     (not a clean sine) read as analog current noise rather than a
-     mechanical pulse: a main swing down to ~0.75, a brief (<120ms even at
-     the top of the 2.2-3.4s duration range) deeper dip to ~0.58 around
-     59-61%, and a brightness overshoot near the end so lit segments
-     visibly overshoot bright as well as dip dark — recalibrated up from an
-     initial 0.92-1.0 pass that read as imperceptible even close up. */
+     tip and its glow flicker in the same phase. Nine uneven keyframe stops
+     at uneven values, held via `steps(1, end)` instead of eased, read as
+     signal noise/texture rather than breathing — at a 0.45-0.8s period the
+     eye integrates this as shimmer, not a visible swell. Amplitude is
+     deliberately shallow (opacity floor 0.86, brightness 0.92-1.08): a fast
+     *and* deep dip reads as a strobe/malfunction, not texture, so this
+     pulled back from an earlier 2.2-3.4s/0.58-floor pass that was tuned for
+     a much slower cycle. */
   .seg.tip-flicker {
-    animation: lamp-tip-flicker var(--flicker-duration, 2800ms) ease-in-out infinite;
+    animation: lamp-tip-flicker var(--flicker-duration, 600ms) steps(1, end) infinite;
     animation-delay: var(--flicker-delay, 0ms);
   }
 
@@ -237,39 +257,33 @@
       opacity: 1;
       filter: brightness(1);
     }
-    16% {
+    13% {
       opacity: 0.92;
+      filter: brightness(0.96);
+    }
+    27% {
+      opacity: 0.97;
+      filter: brightness(1.04);
+    }
+    38% {
+      opacity: 0.88;
+      filter: brightness(0.94);
+    }
+    54% {
+      opacity: 1;
       filter: brightness(1.08);
     }
-    29% {
-      opacity: 0.75;
-      filter: brightness(0.88);
+    63% {
+      opacity: 0.94;
+      filter: brightness(0.98);
     }
-    41% {
-      opacity: 0.95;
-      filter: brightness(1.1);
+    78% {
+      opacity: 0.86;
+      filter: brightness(0.92);
     }
-    50% {
-      opacity: 1;
-      filter: brightness(1);
-    }
-    59% {
-      opacity: 0.85;
-    }
-    60% {
-      opacity: 0.58;
-      filter: brightness(0.8);
-    }
-    62% {
-      opacity: 0.88;
-    }
-    76% {
-      opacity: 0.78;
-      filter: brightness(0.93);
-    }
-    90% {
-      opacity: 1;
-      filter: brightness(1.15);
+    89% {
+      opacity: 0.98;
+      filter: brightness(1.06);
     }
   }
 </style>
