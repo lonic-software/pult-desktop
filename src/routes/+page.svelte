@@ -12,7 +12,7 @@
     trustRepo,
   } from "$lib/api";
   import type { CommandInfo, DoctorReport, Listing, RunEvent } from "$lib/types";
-  import { groupCommands, type CommandGroup } from "$lib/grouping";
+  import { groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Board from "$lib/components/Board.svelte";
   import RunView from "$lib/components/RunView.svelte";
@@ -54,19 +54,31 @@
   // forceTooltipId and CommandCard.svelte's forceTooltip.
   let forceTooltipId: string | null = $state(null);
 
-  const groups: CommandGroup[] = $derived.by(() => {
-    if (!listing) return [];
+  // groupCommands runs on the raw (unfiltered) listing so the least-nesting
+  // decision (flat vs. nested — see grouping.ts) is made once per listing,
+  // not recomputed per keystroke; a search that happens to leave matches in
+  // only one source must not flip the board out of nested mode mid-typing.
+  // Filtering below only ever removes commands/sub-groups/groups from that
+  // fixed shape.
+  const grouped: GroupedListing = $derived.by(() => {
+    if (!listing) return { nested: false, groups: [] };
     const all = groupCommands(listing);
     const q = search.trim().toLowerCase();
     if (!q) return all;
-    return all
-      .map((g: CommandGroup) => ({
-        ...g,
-        commands: g.commands.filter(
-          (c: CommandInfo) => c.title.toLowerCase().includes(q) || c.id.toLowerCase().includes(q),
-        ),
-      }))
+    const matches = (c: CommandInfo) =>
+      c.title.toLowerCase().includes(q) || c.id.toLowerCase().includes(q);
+    const groups = all.groups
+      .map((g: CommandGroup) => {
+        if (!g.subgroups) {
+          return { ...g, commands: g.commands.filter(matches) };
+        }
+        const subgroups = g.subgroups
+          .map((sg) => ({ ...sg, commands: sg.commands.filter(matches) }))
+          .filter((sg) => sg.commands.length > 0);
+        return { ...g, commands: subgroups.flatMap((sg) => sg.commands), subgroups };
+      })
       .filter((g: CommandGroup) => g.commands.length > 0);
+    return { nested: all.nested, groups };
   });
 
   const selectedCommand = $derived(
@@ -302,7 +314,7 @@
     {:else}
       <main class="content-pane">
         <Board
-          {groups}
+          groups={grouped.groups}
           trusted={listing.trusted}
           {doctorReport}
           {runs}

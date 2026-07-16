@@ -69,7 +69,16 @@
     Math.max(1, Math.floor((rackWidth + RACK_GAP_PX) / (RACK_UNIT_PX + RACK_GAP_PX))),
   );
 
-  function moduleSpan(count: number): number {
+  // Flat groups span one column per card, capped at MAX_MODULE_COLUMNS. A
+  // nested group (one panel per source, category sub-groups inside — see
+  // grouping.ts's least-nesting rule) spans by its *widest* sub-group
+  // instead of its total card count, so a source with two 2-card
+  // categories gets a 2-wide panel with two rows of sub-groups, not a
+  // needlessly-wide 4-across one.
+  function moduleSpan(group: CommandGroup): number {
+    const count = group.subgroups
+      ? Math.max(...group.subgroups.map((sg) => sg.commands.length))
+      : group.commands.length;
     return Math.max(1, Math.min(count, MAX_MODULE_COLUMNS, rackColumns));
   }
 </script>
@@ -86,30 +95,64 @@
       bind:clientWidth={rackWidth}
     >
       {#each groups as group (group.key)}
-        {@const span = moduleSpan(group.commands.length)}
+        {@const span = moduleSpan(group)}
         <div class="module" style="grid-column: span {span}">
           <span class="screw screw-tl" aria-hidden="true"></span>
           <span class="screw screw-tr" aria-hidden="true"></span>
           <span class="screw screw-bl" aria-hidden="true"></span>
           <span class="screw screw-br" aria-hidden="true"></span>
 
-          <div class="module-label-row">
-            <span class="module-label">{group.label}</span>
-          </div>
+          {#if group.subgroups}
+            <!-- Nested (two-level) rendering — see grouping.ts's
+                 least-nesting rule. This branch only ever runs when the
+                 whole board is nested, so the flat branch below stays
+                 exactly as it was before nesting existed. -->
+            <div class="module-label-row module-label-row--source">
+              <span class="module-label module-label--source">{group.label}</span>
+            </div>
 
-          <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
-            {#each group.commands as cmd (cmd.id)}
-              {@const state = readinessFor(cmd, trusted, doctorReport)}
-              <CommandCard
-                command={cmd}
-                {state}
-                running={runs[cmd.id]?.running ?? false}
-                staggerDelay={staggerDelay(cmd.id)}
-                forceTooltip={forceTooltipId === cmd.id}
-                onSelect={() => onSelect(cmd.id)}
-              />
-            {/each}
-          </div>
+            <div class="subgroups">
+              {#each group.subgroups as subgroup (subgroup.key)}
+                <div>
+                  <div class="subgroup-label-row">
+                    <span class="subgroup-label">{subgroup.label}</span>
+                    <span class="subgroup-rule" aria-hidden="true"></span>
+                  </div>
+                  <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
+                    {#each subgroup.commands as cmd (cmd.id)}
+                      {@const state = readinessFor(cmd, trusted, doctorReport)}
+                      <CommandCard
+                        command={cmd}
+                        {state}
+                        running={runs[cmd.id]?.running ?? false}
+                        staggerDelay={staggerDelay(cmd.id)}
+                        forceTooltip={forceTooltipId === cmd.id}
+                        onSelect={() => onSelect(cmd.id)}
+                      />
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="module-label-row">
+              <span class="module-label">{group.label}</span>
+            </div>
+
+            <div class="module-grid" style="grid-template-columns: repeat({span}, 1fr)">
+              {#each group.commands as cmd (cmd.id)}
+                {@const state = readinessFor(cmd, trusted, doctorReport)}
+                <CommandCard
+                  command={cmd}
+                  {state}
+                  running={runs[cmd.id]?.running ?? false}
+                  staggerDelay={staggerDelay(cmd.id)}
+                  forceTooltip={forceTooltipId === cmd.id}
+                  onSelect={() => onSelect(cmd.id)}
+                />
+              {/each}
+            </div>
+          {/if}
         </div>
       {/each}
     </div>
@@ -198,6 +241,51 @@
     text-transform: uppercase;
     color: var(--engrave);
     text-shadow: 0 1px 0 var(--emboss-light);
+  }
+
+  /* Nested (source) panel label — same engraved-divider treatment as
+     .module-label-row/.module-label above, just a touch larger/looser per
+     the "2a nested faceplate" design (11px / 0.24em vs. the flat module
+     header's 10.5px / 0.22em) and a tighter bottom margin, since the
+     sub-group headers below add their own spacing. Applied only when a
+     group has sub-groups, so the flat (single-level) board is untouched. */
+  .module-label-row--source {
+    margin-bottom: 4px;
+  }
+
+  .module-label--source {
+    font-size: 11px;
+    letter-spacing: 0.24em;
+  }
+
+  .subgroups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  /* Engraved rule header for a category sub-group: a small muted label
+     breaking a hairline that runs the rest of the row's width. */
+  .subgroup-label-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 8px 1px 10px;
+  }
+
+  .subgroup-label {
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    font-weight: 500;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .subgroup-rule {
+    flex: 1;
+    height: 1px;
+    background: var(--line);
   }
 
   .module-grid {

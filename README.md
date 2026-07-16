@@ -211,6 +211,21 @@ actual rendered width is measured (`bind:clientWidth`) and every module's
 span is clamped to however many columns actually fit, so narrow windows
 reflow instead of overflowing.
 
+Grouping normally has a single level (a module per category/origin/local
+group, as described under "v0 scope" below), but a manifest that mixes
+multiple sources (an include or two, alongside — or instead of — the local
+commands) with categories gets a second, nested level instead: one module
+per *source* (Local, plus one per include), each containing category
+sub-groups stacked inside it — an engraved rule-and-label header breaking a
+hairline, then that category's own card grid — rather than one flat module
+per category. This only engages when it would actually disambiguate
+something: pult-desktop uses it for the split between its own `pult.yaml`
+categories and its `install`-only module include, but a manifest with only
+one source, or with sources but no categories, stays flat exactly as
+before. The decision (implemented once in `src/lib/grouping.ts`, which
+documents it as the "least-nesting rule") is made for the whole board at
+once from the unfiltered command listing, so it can't flip mid-search.
+
 Inside a module, cards are pressable pads (`--pad` surface, emboss
 highlight, drop shadow, 6px radius) that nudge down 1px with a flattened
 shadow on hover/active — a physical press, not just a border change. Each
@@ -259,7 +274,9 @@ descriptions than the design mockup's placeholders) allows.
 - Open a repository (folder picker) → `pult --list --json` → the board,
   grouped per pult's documented rule (`category` → module name → include
   origin → implicit "local"; local-containing groups first, then include
-  order — implemented once in `src/lib/grouping.ts`)
+  order), nested into per-source/per-category sub-groups instead when the
+  least-nesting rule calls for it (see "Layout" above) — implemented once
+  in `src/lib/grouping.ts`
 - Trust modal (manifest path + includes, pinned revs) → `pult --trust --list`
   → reload; "Not now" leaves the app read-only (forms visible, Run disabled)
 - Readiness via `pult doctor --json` (trust-gated, matches pult's own gate)
