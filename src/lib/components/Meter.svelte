@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { MeterState } from "../readiness";
 
   interface Props {
@@ -12,14 +13,44 @@
     seed?: string;
   }
 
-  let { state, size = "sm", staggerDelay = "0ms", seed = "" }: Props = $props();
+  // Destructured as `propState`, not `state` — Svelte's compiler treats any
+  // `$name` where a local binding named `name` exists as a store-subscription
+  // read (`$store`), so a local `state` would make the `$state` rune below
+  // ambiguous with "subscribe to the store named state" and fail to compile.
+  let { state: propState, size = "sm", staggerDelay = "0ms", seed = "" }: Props = $props();
+
+  // Power-on climb, every mount: force the very first frame to render fully
+  // dark regardless of what `state` already resolved to, then flip to the
+  // real state two frames later so the `.well`/`.seg` transitions below
+  // (which only fire on an actual value change — see their comment) always
+  // have something to climb from. A board card usually looked this way
+  // already, since doctor's answer typically lands a beat after mount; this
+  // makes it true unconditionally instead of racing doctor. A details-page
+  // meter (RunView) mounts with `state` already resolved from props that
+  // existed before the component did, so without this it painted the final
+  // colors at frame one and never animated in at all — the dead-mount bug
+  // this exists to fix. No caller-side prop needed: this is the same fix for
+  // both callers, just invisible on the board where the race usually already
+  // produced the same result. Two nested rAFs, not one — a single rAF risks
+  // Svelte coalescing both the initial dark render and the flip into one
+  // flush with nothing ever actually painted in between.
+  let mounted = $state(false);
+  onMount(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        mounted = true;
+      });
+    });
+  });
+  const displayState = $derived(mounted ? propState : ("none" as MeterState));
 
   // Segments lit bottom-up per the design template's meterFor: running (in
   // progress right now) always wins and shows 3 amber regardless of
   // readiness; otherwise ready shows 4 green, a failing check shows all 5
   // red. "no-check" (doctor confirmed there's no `check:` to run) lights
   // exactly one neutral segment — "powered, no probe" — while "none"
-  // (untrusted, or doctor hasn't answered yet) stays fully dark.
+  // (untrusted, doctor hasn't answered yet, or still mid-climb per
+  // `displayState` above) stays fully dark.
   const LIT_COUNT: Record<MeterState, number> = {
     running: 3,
     ready: 4,
@@ -27,31 +58,38 @@
     "no-check": 1,
     none: 0,
   };
-  const litCount = $derived(LIT_COUNT[state]);
+  const litCount = $derived(LIT_COUNT[displayState]);
   const segments = $derived(Array.from({ length: 5 }, (_, i) => i < litCount));
 
-  // Tip flicker: only the top-most lit segment of a *steady* readiness
-  // (ready/failed) wobbles — analog current isn't perfectly constant.
-  // Running has its own sweep animation already; the single no-check
-  // segment means "no signal," so it stays put. Index is bottom-up (see
-  // `segments` above), so the top lit segment is always `litCount - 1`.
-  // LEDs are fixed hardware — nothing ever translates — so the "level
-  // wobbles up and down" impression is built from two independent loops
-  // layered on this tip segment (and its neighbors), not one. A fast loop
-  // (`.seg.tip-flicker`'s own opacity/filter keyframes, `--flicker-*`
-  // below) is pure signal-noise texture — sub-second shimmer with no
-  // narrative. A slower loop (`--level-*` below) carries the actual
-  // "level" events: the tip occasionally sags (see the tip's dip overlay)
-  // in the same instant the segment directly below it dims a touch too
-  // (see `subTipIndex`/`.seg.sub-tip`), so the top of the column reads as
-  // sagging together — and, for `ready` only, the unlit segment above the
-  // tip catches a decorrelated overshoot glimmer (see `overshootIndex`/
-  // `.seg.overshoot` below). Two loops at two different rates read as
-  // analog drift; cramming both into one sub-second cycle is what made the
-  // glimmer read as a mechanical ~2Hz beat instead. Neither loop ever
-  // changes which count of segments reads as lit.
+  // Tip flicker: the top-most lit segment of running, ready, or failed
+  // wobbles — analog current isn't perfectly constant, and that illusion
+  // shouldn't stop just because the LED reads amber instead of green/red.
+  // (CommandCard separately runs a `.running-strip` progress-bar sweep along
+  // the bottom edge of a running card — a distinct element, not the LED
+  // well, and not touched by any of this — so there's no duplication
+  // between that and the meter's own texture.) The single no-check segment
+  // means "no signal," so it stays put; "none" is fully dark, so there's
+  // nothing to flicker. Index is bottom-up (see `segments` above), so the
+  // top lit segment is always `litCount - 1`. LEDs are fixed hardware —
+  // nothing ever translates — so the "level wobbles up and down" impression
+  // is built from two independent loops layered on this tip segment (and
+  // its neighbors), not one. A fast loop (`.seg.tip-flicker`'s own opacity/
+  // filter keyframes, `--flicker-*` below) is pure signal-noise texture —
+  // sub-second shimmer with no narrative. A slower loop (`--level-*` below)
+  // carries the actual "level" events: the tip occasionally sags (see the
+  // tip's dip overlay) in the same instant the segment directly below it
+  // dims a touch too (see `subTipIndex`/`.seg.sub-tip`), so the top of the
+  // column reads as sagging together — and, for running/ready (where the
+  // well isn't already full to its top segment), the unlit segment above
+  // the tip catches a decorrelated overshoot glimmer, colored to match the
+  // state (see `overshootIndex`/`.seg.overshoot` below). Two loops at two
+  // different rates read as analog drift; cramming both into one sub-second
+  // cycle is what made the glimmer read as a mechanical ~2Hz beat instead.
+  // Neither loop ever changes which count of segments reads as lit.
   const flickerTipIndex = $derived(
-    state === "ready" || state === "failed" ? litCount - 1 : -1,
+    displayState === "running" || displayState === "ready" || displayState === "failed"
+      ? litCount - 1
+      : -1,
   );
 
   // The segment directly below the tip — where the slow loop's dip (see
@@ -59,18 +97,14 @@
   // the *column's* level settling, not a single flickering pixel. Bottom-
   // up indexing (see `segments` above) means this is always the segment
   // one below the tip; `flickerTipIndex` is only ever -1, or >=2 (litCount
-  // is 4 or 5 for the only states that set it), so no extra guard is
+  // is 3, 4, or 5 for the only states that set it), so no extra guard is
   // needed beyond mirroring flickerTipIndex's own -1-when-inapplicable.
   const subTipIndex = $derived(flickerTipIndex >= 0 ? flickerTipIndex - 1 : -1);
 
   // Deterministic per-card desync: a tiny string hash (no shared PRNG
   // state, stable across re-renders) picks a period in 0.45-0.8s and a
   // phase within that period from the command id, so cards never flicker
-  // in lockstep. `FLICKER_SETTLE_MS` is a fixed head start added on top —
-  // it keeps the animation's `animation-delay` comfortably past the 200ms
-  // illumination transition (see the `.well` rule below) so the one-time
-  // fade-in and the infinite flicker loop never fight over the same
-  // box-shadow property.
+  // in lockstep.
   function seedHash(s: string, salt: number): number {
     let h = salt >>> 0;
     for (let i = 0; i < s.length; i++) {
@@ -80,9 +114,33 @@
   }
   const FLICKER_MIN_MS = 450;
   const FLICKER_RANGE_MS = 350; // 0.45s-0.8s period
-  const FLICKER_SETTLE_MS = 260;
   const flickerDuration = $derived(FLICKER_MIN_MS + (seedHash(seed, 0x9e3779b1) % FLICKER_RANGE_MS));
-  const flickerDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % flickerDuration));
+
+  // flickerDelay drives the two layers that DO compete with an in-flight
+  // transition on the same property: the well's glow ripple (`lamp-breathe`
+  // below, animates box-shadow — the same property the well's own turn-on
+  // transition uses) and the tip segment's own noise (`lamp-tip-flicker`,
+  // animates opacity/filter on the very segment that may still be mid
+  // background-color climb — see the per-segment climb delay on `.seg`
+  // below). CSS animations always take over a property from a transition
+  // the moment they're active, so starting either of these before the climb
+  // finished painting the tip segment's final frame would visibly cut the
+  // climb short and make the glow/tip pop rather than settle.
+  // FLICKER_SETTLE_MS is a fixed floor comfortably past the slowest climb
+  // this component ever plays (the 200ms base transition plus up to 4
+  // segments' worth of climb stagger for a `failed` well's tip); a small
+  // seeded jitter on top keeps a sliver of the old per-card desync on these
+  // two layers specifically. This mirrors the original design's fixed
+  // (not --meter-delay-relative) settle constant — a heavily board-staggered
+  // card can in principle still out-wait this floor, exactly as it could
+  // before; fixing that is a `--meter-delay`-wide problem out of scope here.
+  // The dip/glimmer overlays below don't share this constraint — see
+  // `levelDelay`.
+  const FLICKER_SETTLE_MS = 320;
+  const FLICKER_SETTLE_JITTER_MS = 150;
+  const flickerDelay = $derived(
+    FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % FLICKER_SETTLE_JITTER_MS),
+  );
 
   // Level events: a second, much slower seeded cycle (2.8-4.8s) carries
   // the dip/glimmer "events" — same seedHash scheme, new salts, so this
@@ -102,24 +160,41 @@
   // below) — they need to land in the exact same instant for the sag to
   // read as one column-level event rather than two coincidentally-timed
   // ones, so there is deliberately only one delay for both.
-  const levelDelay = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0x165667b1) % levelDuration));
+  //
+  // Unlike `flickerDelay` above, this (and `levelDelay2` below) never needs
+  // a positive settle floor: both overlays it drives paint on their own
+  // `::after` layer, animating only that layer's opacity — a property
+  // nothing else on the segment ever transitions — so there's no shared-
+  // property fight to wait out (see the `.seg.tip-flicker::after` comment).
+  // A NEGATIVE delay puts the animation already mid-cycle, at its own
+  // seeded phase, the instant the class is applied — mount-climb end, or a
+  // later state change — instead of waiting up to a full `--level-duration`
+  // (2.8s-4.8s) to naturally arrive there. That open-ended wait was the
+  // visible dead time on a freshly mounted details-page meter; this is what
+  // makes flicker activity begin the moment the climb finishes rather than
+  // sitting inert for seconds.
+  const levelDelay = $derived(-(seedHash(seed, 0x165667b1) % levelDuration));
   // The overshoot glimmer (see `.seg.overshoot` below) rides the same
   // --level-duration as the dip so they share one slow signal, but gets
   // its own seeded delay on that duration — peaking in lockstep with the
   // dip looked like a mechanical seesaw rather than analog overshoot (the
   // same reason the old fast-loop version used a second delay), so a
-  // second, independently-seeded phase decorrelates the two.
-  const levelDelay2 = $derived(FLICKER_SETTLE_MS + (seedHash(seed, 0xd3a2646c) % levelDuration));
+  // second, independently-seeded phase decorrelates the two. Also negative
+  // for the same zero-wait reason as `levelDelay`.
+  const levelDelay2 = $derived(-(seedHash(seed, 0xd3a2646c) % levelDuration));
 
-  // `ready` is the only steady state with a segment above its tip to
+  // running and ready are the two states with a segment above their tip to
   // glimmer into (failed's tip is already the top of the 5-segment well —
-  // see the LIT_COUNT/flickerTipIndex comments above). Bottom-up indexing
-  // means that segment is exactly `litCount`.
-  const overshootIndex = $derived(state === "ready" ? litCount : -1);
+  // see the LIT_COUNT/flickerTipIndex comments above, and it keeps dips
+  // only, no invented 6th level). Bottom-up indexing means that segment is
+  // exactly `litCount`.
+  const overshootIndex = $derived(
+    displayState === "running" || displayState === "ready" ? litCount : -1,
+  );
 </script>
 
 <div
-  class="well {size} glow-{state}"
+  class="well {size} glow-{displayState}"
   style="--meter-delay: {staggerDelay}; --flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms"
   aria-hidden="true"
 >
@@ -127,10 +202,11 @@
     {#each segments as lit, i (i)}
       <span
         class="seg"
-        class:lit-running={lit && state === "running"}
-        class:lit-ready={lit && state === "ready"}
-        class:lit-failed={lit && state === "failed"}
-        class:lit-no-check={lit && state === "no-check"}
+        style="--seg-index: {i}"
+        class:lit-running={lit && displayState === "running"}
+        class:lit-ready={lit && displayState === "ready"}
+        class:lit-failed={lit && displayState === "failed"}
+        class:lit-no-check={lit && displayState === "no-check"}
         class:tip-flicker={i === flickerTipIndex}
         class:sub-tip={i === subTipIndex}
         class:overshoot={i === overshootIndex}
@@ -146,12 +222,14 @@
      hardware awaiting power, not missing UI. Only the *illumination*
      transitions: box-shadow (for the glow) and each segment's
      background-color are the only animated properties, and only fire when
-     their computed value actually changes — a fresh mount already has the
-     right value painted at first frame, so nothing animates in from
-     nothing. The glow is expressed as a second, always-present box-shadow
-     layer (transparent when unlit) rather than conditionally adding/
-     removing a shadow layer, so the two-layer value can interpolate
-     smoothly instead of popping. */
+     their computed value actually changes. `displayState` (see the script
+     block's mount-climb comment) guarantees every real mount starts from
+     "none" and flips to the resolved state a couple of frames later, so
+     that first change is always real — nothing pops in unanimated, on the
+     board or on the details page. The glow is expressed as a second,
+     always-present box-shadow layer (transparent when unlit) rather than
+     conditionally adding/removing a shadow layer, so the two-layer value
+     can interpolate smoothly instead of popping. */
   .well {
     flex: none;
     padding: 4px 3px;
@@ -171,10 +249,12 @@
 
   .well.glow-running {
     --glow: color-mix(in srgb, var(--accent) 70%, transparent);
+    --overshoot-color: var(--accent);
   }
 
   .well.glow-ready {
     --glow: color-mix(in srgb, var(--lamp-green) 65%, transparent);
+    --overshoot-color: var(--lamp-green);
   }
 
   .well.glow-failed {
@@ -183,18 +263,20 @@
 
   /* Tip flicker, part 1: the glow carries a faint ripple (11-14px blur on
      the same shadow layer built above — never dips below ~79% of its peak,
-     so the halo stays clearly visible at every frame) in steady states
-     only, phase-locked to the tip segment's opacity/brightness noise below.
-     Nine uneven keyframe stops plus `steps(1, end)` (a held value that
-     jumps to the next, no easing) read as electrical noise rather than a
-     pulse — at a sub-second period a smooth ease would still look like a
-     swell. `animation-delay` (see --flicker-delay above) is always positive
-     and comfortably past the 200ms illumination transition, so the
-     animation only takes over box-shadow *after* that one-time fade-in has
-     already finished — avoiding a fight between the transition and this
-     infinite loop over the same property. prefers-reduced-motion already
-     collapses all animation-duration to ~0 globally (see global.css), so
-     this is inert there without any extra guard. */
+     so the halo stays clearly visible at every frame) in running, ready,
+     and failed alike, phase-locked to the tip segment's opacity/brightness
+     noise below. Nine uneven keyframe stops plus `steps(1, end)` (a held
+     value that jumps to the next, no easing) read as electrical noise
+     rather than a pulse — at a sub-second period a smooth ease would still
+     look like a swell. `animation-delay` (see --flicker-delay above) has a
+     fixed positive floor past the segments' own climb-in transitions, so
+     the animation only takes over box-shadow *after* that has already
+     finished — avoiding a fight between the transition and this infinite
+     loop over the same property (see the `flickerDelay` comment in the
+     script block). prefers-reduced-motion already collapses all
+     animation-duration to ~0 globally (see global.css), so this is inert
+     there without any extra guard. */
+  .well.glow-running,
   .well.glow-ready,
   .well.glow-failed {
     animation: lamp-breathe var(--flicker-duration, 600ms) steps(1, end) infinite;
@@ -266,7 +348,17 @@
     border-radius: 1.5px;
     background: var(--seg-off);
     transition: background-color 200ms ease;
-    transition-delay: var(--meter-delay, 0ms);
+    /* Per-segment climb: `--seg-index` (set inline per span, bottom-up —
+       see `segments` above) adds a small stagger on top of the card-level
+       `--meter-delay`, so a column with several segments changing at once
+       (a fresh power-on, or e.g. running's 3-amber swapping to ready's
+       4-green) visibly lights bottom-up instead of all segments cross-
+       fading in lockstep — the same "climb" the board's card-by-card
+       stagger produces, one level down. 25ms/segment keeps a 5-segment
+       `failed` well's total climb (200ms + 4*25ms = 300ms) short enough to
+       read as instant, not sluggish; `flickerDelay`'s floor above accounts
+       for this worst case explicitly. */
+    transition-delay: calc(var(--meter-delay, 0ms) + var(--seg-index, 0) * 25ms);
   }
 
   .well.lg .seg {
@@ -365,6 +457,9 @@
      property on the overlay; the tip element underneath still only
      animates opacity/filter itself). At rest the overlay is fully
      transparent, so it never darkens the resting/reduced-motion frame.
+     This independence from the tip's own animated properties is also why
+     `--level-delay` (unlike `--flicker-delay`) can go negative and start
+     the instant the class applies — see that comment in the script block.
 
      Two brief, uneven events per `--level-duration` cycle (24%-27% and
      60%-63% — chosen clear of the glimmer's 9/41/78 stops on the
@@ -449,20 +544,22 @@
     }
   }
 
-  /* Level events, part 3 — overshoot: the segment directly above a `ready`
-     tip (see `overshootIndex`) is never lit (LIT_COUNT never changes), but
-     it can catch a faint, brief glimmer — the analog equivalent of a VU
-     meter's next LED catching a transient. `failed` has no segment above
-     its tip (5 lit is the top of the 5-segment well) so it never gets this
-     class; per the design there is no undershoot-only case that also
-     invents a 6th level.
+  /* Level events, part 3 — overshoot: the segment directly above a
+     running or ready tip (see `overshootIndex`) is never lit (LIT_COUNT
+     never changes), but it can catch a faint, brief glimmer — the analog
+     equivalent of a VU meter's next LED catching a transient. `failed` has
+     no segment above its tip (5 lit is the top of the 5-segment well) so it
+     never gets this class; per the design there is no undershoot-only case
+     that also invents a 6th level.
 
      This segment's own `background` stays `--seg-off` for its whole
-     lifetime (it is not, and must never look like, a steadily-lit 5th
-     segment) — the glimmer is painted on a `::after` overlay instead, pre-
-     colored in the lit green and driven purely by `opacity`. That keeps
-     every animated property here compositor-cheap (opacity only, same
-     tier as the tip's opacity/filter above) without ever touching
+     lifetime (it is not, and must never look like, a steadily-lit segment)
+     — the glimmer is painted on a `::after` overlay instead, colored via
+     `--overshoot-color` (set per state on the `.well.glow-*` rules above —
+     amber for running, green for ready — so this one rule serves both
+     without duplicating it per state) and driven purely by `opacity`. That
+     keeps every animated property here compositor-cheap (opacity only,
+     same tier as the tip's opacity/filter above) without ever touching
      `background-color`, which is not compositor-cheap and was rejected for
      that reason even though it would have been simpler.
 
@@ -486,7 +583,7 @@
     position: absolute;
     inset: 0;
     border-radius: inherit;
-    background: var(--lamp-green);
+    background: var(--overshoot-color, var(--lamp-green));
     opacity: 0;
     animation: lamp-level-glimmer var(--level-duration, 3600ms) steps(1, end) infinite;
     animation-delay: var(--level-delay-2, var(--level-delay, 0ms));
