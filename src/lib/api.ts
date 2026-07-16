@@ -19,3 +19,4 @@ export const pultVersion = backend.pultVersion;
 export const getPultPath = backend.getPultPath;
 export const setPultPath = backend.setPultPath;
 export const runCommand = backend.runCommand;
+export const resolvePickSource = backend.resolvePickSource;

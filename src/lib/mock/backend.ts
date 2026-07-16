@@ -47,6 +47,29 @@ export async function setPultPath(_path: string): Promise<void> {
   await delay(80);
 }
 
+// Canned `pick.source` resolution for the dynamic-pick fixture
+// (`aws:deploy`'s `customer` param, which `depends_on: ["region"]`) — keyed
+// by `<commandId>.<paramName>` so the mock stays shaped like the real
+// resolve call (repo, command, param, depends_on values). A small artificial
+// delay so the loading state is demoable without a real `pult`.
+const MOCK_PICK_SOURCE_OPTIONS: Record<string, (values: Record<string, string>) => string[]> = {
+  "aws:deploy.customer": (values) =>
+    values.region === "us-east-1"
+      ? ["us-nova-holdings", "us-atlas-retail"]
+      : ["eu-nova-holdings", "eu-atlas-retail"],
+};
+
+export async function resolvePickSource(
+  _path: string,
+  commandId: string,
+  paramName: string,
+  values: Record<string, string>,
+): Promise<string[]> {
+  await delay(350);
+  const resolver = MOCK_PICK_SOURCE_OPTIONS[`${commandId}.${paramName}`];
+  return resolver ? resolver(values) : [];
+}
+
 const MOCK_RUN_LOG: Record<string, string[]> = {
   shell: ["opening a shell in dev…", "done"],
   status: ["checking status…", "all good"],

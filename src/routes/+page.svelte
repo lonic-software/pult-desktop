@@ -290,6 +290,7 @@
       <main class="content-pane">
         <RunView
           command={selectedCommand}
+          path={repoPath ?? ""}
           trusted={listing.trusted}
           {doctorReport}
           running={selectedRun?.running ?? false}

@@ -9,9 +9,10 @@
 //! it isn't found, tests print a note and skip rather than failing the
 //! whole suite — this crate doesn't vendor pult itself.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use pult_desktop_lib::pult_bin::run_capture;
+use pult_desktop_lib::pult_bin::{resolve_pick_source, run_capture};
 use pult_desktop_lib::types::{DoctorReport, Listing};
 
 fn fixture_repo() -> PathBuf {
@@ -198,4 +199,66 @@ async fn run_keeps_secret_values_out_of_the_running_banner() {
         .await
         .expect("run_capture should succeed");
     assert!(via_run_capture.status.success());
+}
+
+/// `resolve_pick_source` (unlike every other function under test here) never
+/// invokes `pult` to do the actual work of running the source command — it
+/// only calls `pult --list --json` to read the manifest and check trust,
+/// then shells out itself. That inner `pult --list --json` call goes through
+/// `run_capture`, which — unlike the `run_in_fixture` helper above — doesn't
+/// take a custom env, so it only sees `PULT_TRUST_STORE` if it's set on this
+/// test process's own environment. Everything here therefore runs in one
+/// `#[tokio::test]` function, sequentially, so this test is never racing
+/// another test (or itself) over that process-global mutation — every other
+/// test in this file passes its own `PULT_TRUST_STORE` override directly to
+/// its child process via `.env(...)`, so it's unaffected either way.
+#[tokio::test]
+async fn resolve_pick_source_end_to_end() {
+    let Some(bin) = test_pult_bin() else { return };
+    let trust_store = tempfile::NamedTempFile::new().unwrap();
+    std::fs::remove_file(trust_store.path()).ok();
+    let repo = fixture_repo().to_string_lossy().to_string();
+
+    unsafe {
+        std::env::set_var("PULT_TRUST_STORE", trust_store.path());
+    }
+
+    // Untrusted manifest: refused before the source command ever runs — the
+    // same trust gate `pult doctor` applies to `check:`.
+    let mut values = HashMap::new();
+    values.insert("region".to_string(), "eu-west-1".to_string());
+    let untrusted = resolve_pick_source(&bin, &repo, "aws:deploy", "target", &values).await;
+    assert!(untrusted.is_err(), "untrusted repo should refuse resolution");
+    assert!(
+        untrusted.unwrap_err().to_lowercase().contains("trust"),
+        "refusal should mention trust"
+    );
+
+    // Trust the manifest, same as the app's trust flow.
+    run_in_fixture(&bin, trust_store.path(), &["--trust", "--list"], None).await;
+
+    // Success + depends_on interpolation: the fixture's `target` param
+    // sources `echo target-{region}-a; echo target-{region}-b`, so the
+    // resolved options must reflect the `region` value we hand in — proving
+    // both that resolution works and that `{region}` was actually
+    // interpolated (not just literally passed through).
+    let mut values = HashMap::new();
+    values.insert("region".to_string(), "us-east-1".to_string());
+    let options = resolve_pick_source(&bin, &repo, "aws:deploy", "target", &values)
+        .await
+        .expect("resolution should succeed once trusted");
+    assert_eq!(options, vec!["target-us-east-1-a", "target-us-east-1-b"]);
+
+    // A different region value produces different options — confirms this
+    // isn't a cached/static result.
+    let mut values = HashMap::new();
+    values.insert("region".to_string(), "eu-west-1".to_string());
+    let options = resolve_pick_source(&bin, &repo, "aws:deploy", "target", &values)
+        .await
+        .expect("resolution should succeed for a different region too");
+    assert_eq!(options, vec!["target-eu-west-1-a", "target-eu-west-1-b"]);
+
+    unsafe {
+        std::env::remove_var("PULT_TRUST_STORE");
+    }
 }

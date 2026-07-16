@@ -12,6 +12,7 @@
 
   interface Props {
     command: CommandInfo;
+    path: string;
     trusted: boolean;
     doctorReport: DoctorReport | null;
     running: boolean;
@@ -20,7 +21,8 @@
     onBack: () => void;
   }
 
-  let { command, trusted, doctorReport, running, outputLines, onRun, onBack }: Props = $props();
+  let { command, path, trusted, doctorReport, running, outputLines, onRun, onBack }: Props =
+    $props();
 
   let values: Record<string, string> = $state({});
 
@@ -86,7 +88,11 @@
         {#each command.params as param (param.name)}
           <ParamField
             {param}
+            {path}
+            {trusted}
+            commandId={command.id}
             value={values[param.name] ?? ""}
+            {values}
             onChange={(v) => (values = { ...values, [param.name]: v })}
           />
         {/each}

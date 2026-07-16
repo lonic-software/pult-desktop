@@ -6,16 +6,32 @@
 //! separate install — is deliberately not wired up in v0; see the README's
 //! "Sidecar bundling" section for the plan.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
+use std::time::Duration;
 
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use tokio::time::timeout;
+
+use crate::types::Listing;
 
 const SETTINGS_STORE: &str = "settings.json";
 const PULT_PATH_KEY: &str = "pultPath";
+
+/// How long a `pick.source` shell-out gets before we give up on it. pult
+/// itself doesn't bound this (it's talking to a real terminal), but a
+/// resolve call blocks a form field, so it needs a ceiling.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on stdout/stderr we'll buffer from a `pick.source` command — option
+/// lists are short; this is only a backstop against a runaway/malicious
+/// script, not a real limit anyone should hit.
+const RESOLVE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+/// Cap on the number of options we'll hand back to the UI.
+const RESOLVE_MAX_OPTIONS: usize = 500;
 
 /// Read the user-configured `pult` path override, if any, from the store.
 pub fn stored_pult_path(app: &AppHandle) -> Option<String> {
@@ -101,4 +117,274 @@ pub async fn run_capture(
 /// Trim and stringify a process's stderr for display.
 pub fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
+}
+
+/// Resolve a `pick.source` param's live options.
+///
+/// pult 0.4 has no CLI surface for this: `--print` is explicitly
+/// side-effect-free and does **not** run dynamic option sources, and there
+/// is no resolve/complete subcommand (see docs/reference.md's `pult <id>
+/// --print` note and the CLI summary — checked against the installed
+/// `pult --version` / `pult --help` too). So — per the README's documented
+/// plan — we replicate pult's documented `pick.from` semantics ourselves
+/// rather than inventing our own: run the source string via `sh -c`, with
+/// `{param}` strictly interpolated (only names in the param's declared
+/// `depends_on`, values shell-quoted) and `{{`/`}}` escaping literal braces;
+/// stdout lines (trimmed, non-empty) become options; a non-zero exit or an
+/// empty result is an error.
+///
+/// Trust gate: a `pick.source` command is manifest-authored shell code, same
+/// as a `check:` — `pult doctor` only runs those for a trusted manifest, so
+/// we mirror that here. Unlike `run_command` (which hands off to `pult`
+/// itself and lets *it* enforce the non-interactive-and-untrusted refusal),
+/// this call never invokes `pult` to run anything, so there's no inner gate
+/// to defer to — we re-check `trusted` ourselves via `pult --list --json`
+/// rather than accepting a frontend-supplied flag, so a stale or spoofed
+/// frontend state can't bypass it.
+pub async fn resolve_pick_source(
+    bin: &PathBuf,
+    path: &str,
+    command_id: &str,
+    param_name: &str,
+    values: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let listing_output = run_capture(bin, path, &["--list", "--json"], None).await?;
+    if !listing_output.status.success() {
+        return Err(format!(
+            "Couldn't read this repository's commands: {}",
+            stderr_text(&listing_output)
+        ));
+    }
+    let listing: Listing = serde_json::from_slice(&listing_output.stdout)
+        .map_err(|e| format!("Couldn't read this repository's commands: {e}"))?;
+
+    if !listing.trusted {
+        return Err("Trust this repository before resolving live options.".to_string());
+    }
+
+    let command = listing
+        .commands
+        .iter()
+        .find(|c| c.id == command_id)
+        .ok_or_else(|| format!("Unknown command: {command_id}"))?;
+    let param = command
+        .params
+        .iter()
+        .find(|p| p.name == param_name)
+        .ok_or_else(|| format!("Unknown param: {param_name}"))?;
+    let source = param
+        .source
+        .as_deref()
+        .ok_or_else(|| format!("{param_name} isn't a dynamic pick param"))?;
+
+    let depends_on = param.depends_on.clone().unwrap_or_default();
+    for dep in &depends_on {
+        if !values.contains_key(dep) {
+            return Err(format!("{param_name} depends on {dep}, which has no value yet"));
+        }
+    }
+
+    let script = interpolate_source(source, &depends_on, values)?;
+    // `run_dir` is where commands and option sources execute (differs from
+    // `dir` only in user scope, per docs/reference.md's field notes); fall
+    // back to the given path defensively if a future schema ever omits it.
+    let cwd = if listing.run_dir.is_empty() { path } else { &listing.run_dir };
+
+    run_pick_source(&script, cwd).await
+}
+
+/// Strict `{param}` interpolation for a `pick.source` string, matching
+/// pult's documented semantics for `pick.from` / `run:` templates: only a
+/// name declared in `depends_on` may be substituted (an unknown name is a
+/// load error, mirroring pult's own "must be declared" rule), `{{` and `}}`
+/// escape literal braces, and every substituted value is shell-quoted.
+///
+/// Assumption: the reference doc states the `{{`/`}}` escapes without
+/// spelling out a full escaping state machine. We take the conservative
+/// reading — a bare `}` that isn't closing a `{name}` placeholder and isn't
+/// part of `}}` is passed through literally rather than rejected, since
+/// pult itself already validated this string when the manifest loaded (a
+/// `depends_on` we were handed only exists because pult's own parser
+/// accepted the template), so by the time we see it here it's already
+/// known-good; we're being lenient about characters we don't need to
+/// reject, not re-validating pult's own grammar.
+fn interpolate_source(
+    template: &str,
+    depends_on: &[String],
+    values: &HashMap<String, String>,
+) -> Result<String, String> {
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => {
+                out.push('{');
+                i += 2;
+            }
+            '{' => {
+                let Some(rel) = chars[i + 1..].iter().position(|&c| c == '}') else {
+                    return Err("This param's option source has an unterminated `{`".to_string());
+                };
+                let end = i + 1 + rel;
+                let name: String = chars[i + 1..end].iter().collect();
+                if !depends_on.iter().any(|d| d == &name) {
+                    return Err(format!(
+                        "This param's option source references {{{name}}}, which isn't in its depends_on list"
+                    ));
+                }
+                let value = values.get(&name).cloned().unwrap_or_default();
+                out.push_str(&shell_quote(&value));
+                i = end + 1;
+            }
+            '}' if chars.get(i + 1) == Some(&'}') => {
+                out.push('}');
+                i += 2;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// POSIX single-quote a value for `sh -c`, escaping embedded `'` as `'\''`.
+/// Never logged — this is the one place a secret `depends_on` value could
+/// end up in a string, and it only ever reaches the child process's argv.
+fn shell_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Run an already-interpolated `pick.source` script via `sh -c` in `cwd`,
+/// bounded by [`RESOLVE_TIMEOUT`] and [`RESOLVE_MAX_OUTPUT_BYTES`]. Never
+/// panics: every failure mode (spawn error, timeout, non-zero exit, empty
+/// output) becomes a typed `Err` string for the UI.
+async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Couldn't run this param's option source: {e}"))?;
+
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+
+    let outcome = timeout(RESOLVE_TIMEOUT, async {
+        let mut out_buf = Vec::new();
+        let mut err_buf = Vec::new();
+        let mut capped_stdout = (&mut stdout).take(RESOLVE_MAX_OUTPUT_BYTES as u64);
+        let mut capped_stderr = (&mut stderr).take(RESOLVE_MAX_OUTPUT_BYTES as u64);
+        let _ = tokio::join!(
+            capped_stdout.read_to_end(&mut out_buf),
+            capped_stderr.read_to_end(&mut err_buf),
+        );
+        let status = child.wait().await;
+        (status, out_buf, err_buf)
+    })
+    .await;
+
+    let (status, stdout_bytes, stderr_bytes) = match outcome {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = child.start_kill();
+            return Err(
+                "Timed out resolving options (10s) — the repository's option source didn't finish"
+                    .to_string(),
+            );
+        }
+    };
+
+    let status = status.map_err(|e| format!("Couldn't run this param's option source: {e}"))?;
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "This param's option source exited with an error".to_string()
+        } else {
+            format!("This param's option source failed: {stderr}")
+        });
+    }
+
+    let options: Vec<String> = String::from_utf8_lossy(&stdout_bytes)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(RESOLVE_MAX_OPTIONS)
+        .collect();
+
+    if options.is_empty() {
+        return Err("This param's option source returned no options".to_string());
+    }
+
+    Ok(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpolate_source_substitutes_depends_on_values_shell_quoted() {
+        let depends_on = vec!["region".to_string()];
+        let mut values = HashMap::new();
+        values.insert("region".to_string(), "eu-west-1".to_string());
+
+        let script =
+            interpolate_source("echo target-{region}-a; echo target-{region}-b", &depends_on, &values)
+                .unwrap();
+        assert_eq!(script, "echo target-'eu-west-1'-a; echo target-'eu-west-1'-b");
+    }
+
+    #[test]
+    fn interpolate_source_shell_quotes_embedded_single_quotes() {
+        let depends_on = vec!["name".to_string()];
+        let mut values = HashMap::new();
+        values.insert("name".to_string(), "o'brien".to_string());
+
+        let script = interpolate_source("echo {name}", &depends_on, &values).unwrap();
+        assert_eq!(script, "echo 'o'\\''brien'");
+    }
+
+    #[test]
+    fn interpolate_source_escapes_doubled_braces() {
+        let depends_on: Vec<String> = vec![];
+        let values = HashMap::new();
+
+        let script = interpolate_source("echo {{literal}}", &depends_on, &values).unwrap();
+        assert_eq!(script, "echo {literal}");
+    }
+
+    #[test]
+    fn interpolate_source_rejects_a_name_outside_depends_on() {
+        let depends_on: Vec<String> = vec![];
+        let values = HashMap::new();
+
+        let err = interpolate_source("echo {region}", &depends_on, &values).unwrap_err();
+        assert!(err.contains("region"), "error should name the offending param: {err}");
+    }
+
+    #[test]
+    fn interpolate_source_rejects_unterminated_placeholder() {
+        let depends_on: Vec<String> = vec![];
+        let values = HashMap::new();
+
+        let err = interpolate_source("echo {region", &depends_on, &values).unwrap_err();
+        assert!(err.contains("unterminated"), "error was: {err}");
+    }
 }

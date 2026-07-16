@@ -16,6 +16,7 @@ pub fn run() {
             commands::get_pult_path,
             commands::set_pult_path,
             commands::run_command,
+            commands::resolve_pick_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

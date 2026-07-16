@@ -13,7 +13,11 @@ list with a detail pane bolted on. See "Layout" below.
 
 This app doesn't reimplement any of pult's logic. It's a thin client over
 pult's **documented machine surfaces** — everything it does, pult's CLI could
-also do standing alone.
+also do standing alone. The one documented exception is resolving a dynamic
+`pick.source`'s live options: pult 0.4 has no CLI surface for that (`--print`
+is explicitly side-effect-free and never runs one), so the app replicates
+pult's own documented `pick.from` semantics itself — see "Dynamic pick
+sources" below.
 
 ## The sidecar contract
 
@@ -29,6 +33,21 @@ pult repo's `docs/reference.md` for the authoritative spec):
 
 Schema 1 is additive-only; this app deserializes leniently (unknown fields
 are ignored, never rejected) so it keeps working across pult point releases.
+
+### Dynamic pick sources
+
+A `pick` param with `source` (`pick.from` in the manifest) has no resolve
+subcommand in pult 0.4 to defer to, so `src-tauri/src/pult_bin.rs`'s
+`resolve_pick_source` shells the source command out itself, replicating
+pult's documented `pick.from` / `run:` semantics from `docs/reference.md`
+rather than inventing new ones: `sh -c`, strict `{param}` interpolation over
+only the param's declared `depends_on` values (shell-quoted, `{{`/`}}` escape
+literal braces), stdout lines (trimmed, non-empty) become options, and a
+non-zero exit or empty result is an error. It's gated on trust the same way
+`pult doctor` gates `check:` — both are manifest-authored shell code — except
+this call never hands off to `pult` to enforce that itself (there's nothing
+to hand off to), so it re-checks `trusted` via its own `pult --list --json`
+call rather than accepting a frontend-supplied flag.
 
 ## Dev setup
 
@@ -236,14 +255,16 @@ descriptions than the design mockup's placeholders) allows.
   → reload; "Not now" leaves the app read-only (forms visible, Run disabled)
 - Readiness via `pult doctor --json` (trust-gated, matches pult's own gate)
 - Run a command: generated param form (pick/options → select, pick/source →
-  text input with a "comes from the repository at prompt time" hint,
-  input → text, `secret: true` → password), values sent via
-  `--params-json` over stdin, stdout/stderr streamed live via Tauri events
-  into a mono output pane, exit code shown at the end. Each run gets a
-  client-generated `run_id` threaded through every event on the shared
-  `pult://run-output` channel, so more than one command can run at once
-  without their output getting cross-attributed (see `RunEvent` in
-  `src-tauri/src/types.rs` and `src/routes/+page.svelte`'s `runs` map).
+  select populated by live resolution — see "Dynamic pick sources" above;
+  loading/unmet-`depends_on`/resolve-failure states, debounced re-resolve
+  when a `depends_on` value changes, input → text, `secret: true` →
+  password), values sent via `--params-json` over stdin, stdout/stderr
+  streamed live via Tauri events into a mono output pane, exit code shown at
+  the end. Each run gets a client-generated `run_id` threaded through every
+  event on the shared `pult://run-output` channel, so more than one command
+  can run at once without their output getting cross-attributed (see
+  `RunEvent` in `src-tauri/src/types.rs` and `src/routes/+page.svelte`'s
+  `runs` map).
 - `interactive: true` commands refuse to run in-app with an explanatory hint
   (run it in a real terminal instead — no pty in v0)
 - `pult` binary resolution: `which pult`, overridable in Settings (stored via
@@ -253,8 +274,6 @@ descriptions than the design mockup's placeholders) allows.
 
 - Sidecar bundling
 - A pty-backed runner for `interactive` commands
-- Dynamic `pick.from` resolution (v0 shows the raw source as a hint, doesn't
-  shell out for live options)
 - `PULT_EVENTS` step-ladder rendering (progress/status/step events)
 
 ## Next steps
@@ -267,9 +286,6 @@ descriptions than the design mockup's placeholders) allows.
   should claim that channel itself (pult passes it through untouched when
   already set — see docs/reference.md's Events protocol) and render a live
   step/percentage indicator instead of just raw output lines.
-- **Dynamic pick sources** — actually shell out for `pick.source` options at
-  prompt time (with the declared `depends_on` params filled in), instead of
-  a plain text field with a hint.
 - **Sidecar bundling** — ship a checksummed `pult` release binary alongside
   the app as a Tauri sidecar, so pult-desktop works with no separate
   install. Planned shape: fetch the platform-appropriate release asset at
@@ -292,7 +308,12 @@ contracts the Tauri commands use, minus the `AppHandle`. Each test uses its
 own isolated `PULT_TRUST_STORE` temp file so nothing touches your real trust
 store. They default to `../../tui/target/debug/pult` relative to this repo;
 override with `PULT_DESKTOP_TEST_BIN` if your `tui` checkout lives elsewhere.
-Tests skip (rather than fail) if no binary is found.
+Tests skip (rather than fail) if no binary is found. `resolve_pick_source`
+has no way to pass a per-call env override (unlike the other tests' local
+`run_in_fixture` helper), since it goes through the same `run_capture` the
+app uses; its test sets `PULT_TRUST_STORE` on the test process itself for
+that reason, so it stays a single sequential `#[tokio::test]` rather than
+several — see the comment on `resolve_pick_source_end_to_end`.
 
 Mock-mode UI screenshots are the other half of manual verification — see
 "Mock mode" above for the URL params used to script them. The current

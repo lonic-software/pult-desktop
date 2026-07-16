@@ -183,3 +183,19 @@ pub async fn run_command(
 
     Ok(())
 }
+
+/// Resolve a `pick.source` param's live options: `crate::pult_bin` does the
+/// actual work (trust check, interpolation, shell-out) since it doesn't need
+/// an `AppHandle` — this command just resolves the binary and delegates, the
+/// same "thin wrapper" shape as every other command in this file.
+#[tauri::command]
+pub async fn resolve_pick_source(
+    app: AppHandle,
+    path: String,
+    command_id: String,
+    param_name: String,
+    values: HashMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let bin = resolve_pult(&app)?;
+    crate::pult_bin::resolve_pick_source(&bin, &path, &command_id, &param_name, &values).await
+}

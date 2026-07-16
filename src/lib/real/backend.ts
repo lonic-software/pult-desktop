@@ -36,6 +36,15 @@ export async function setPultPath(path: string): Promise<void> {
   await invoke<void>("set_pult_path", { path });
 }
 
+export async function resolvePickSource(
+  path: string,
+  commandId: string,
+  paramName: string,
+  values: Record<string, string>,
+): Promise<string[]> {
+  return invoke<string[]>("resolve_pick_source", { path, commandId, paramName, values });
+}
+
 export async function runCommand(
   path: string,
   id: string,
