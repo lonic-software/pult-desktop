@@ -26,6 +26,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 which = "8.0.5"
 tokio = { version = "1.52.3", features = ["process", "io-util", "rt", "macros", "time"] }
+# Not on crates.io (git-only, version 0.0.0) — pinned to the tip of `dev` as
+# of this writing. Repairs PATH from the user's login shell on macOS/Linux
+# (GUI launches inherit launchd's/desktop-session's minimal PATH, not the
+# shell's) and fixes a Windows PATH-inheritance bug in
+# `std::process::Command`; see src-tauri/src/lib.rs's call site.
+fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs", rev = "c4c45d503ea115a839aae718d02f79e7c7f0f673" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

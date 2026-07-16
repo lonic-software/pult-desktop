@@ -279,6 +279,15 @@ descriptions than the design mockup's placeholders) allows.
 - `pult` binary resolution: settings override → `which pult` on PATH → a
   bundled sidecar binary, so the app works with no separate install (see
   "Sidecar bundling" below)
+- Login-shell `PATH` repair on startup (macOS/Linux): a GUI launch (Finder,
+  dock, a `.desktop` entry) inherits launchd's/the session's minimal `PATH`,
+  not the shell's — so without this, `pult`'s `check:`/`run:` shell-outs
+  can't find Homebrew or toolchain binaries even though the same checks pass
+  from a terminal. `src-tauri/src/lib.rs`'s `run()` calls
+  [`fix_path_env::fix()`](https://github.com/tauri-apps/fix-path-env-rs)
+  first thing, before anything spawns; failure is logged and ignored rather
+  than failing the app, and it's a no-op when launched from a terminal
+  (`PATH` is already correct there).
 
 **Not wired up yet** (see "Next steps"):
 
