@@ -1,10 +1,12 @@
 //! Locating and invoking the `pult` binary.
 //!
-//! v0 resolves `pult` from (in order): a path saved in the settings store,
-//! then `which pult` on the user's PATH. Sidecar bundling — shipping a
-//! checksummed release binary alongside the app so it works with no
-//! separate install — is deliberately not wired up in v0; see the README's
-//! "Sidecar bundling" section for the plan.
+//! `pult` is resolved from (in order): a path saved in the settings store,
+//! then `which pult` on the user's PATH, then a bundled sidecar binary next
+//! to the app's own executable — see [`resolve_pult`]. The sidecar is a
+//! checksummed pult release binary fetched per-target-triple at package
+//! time by `scripts/fetch-pult-sidecar.mjs` (pinned version + checksums in
+//! `src-tauri/sidecar.json`) and registered via `tauri.conf.json`'s
+//! `bundle.externalBin`; see the README's "Sidecar bundling" section.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,19 +58,36 @@ pub fn set_stored_pult_path(app: &AppHandle, path: &str) -> Result<(), String> {
 /// can't be found — this exact string is what the "binary missing" empty
 /// state in the UI displays.
 ///
-/// Sidecar bundling plan (not implemented yet): once wired up, this
-/// function's precedence would become (1) the settings override above,
-/// unchanged — an explicit user choice always wins — (2) `which pult` on
-/// PATH, so a system install is still preferred over a bundled copy, then
-/// (3) the bundled sidecar binary as the final fallback, so the app works
-/// out of the box with no separate install. The sidecar itself would be:
-/// a checksummed release binary fetched per-target-triple at package time
-/// (`src-tauri/tauri.conf.json`'s `bundle.externalBin`, resolved at runtime
-/// via `tauri_plugin_shell`'s sidecar API or a bundled-resource path), with
-/// the checksum verified against pult's published release manifest before
-/// first use. See the README's "Sidecar bundling" section.
+/// Precedence: (1) the settings override above — an explicit user choice
+/// always wins — (2) `which pult` on PATH, so a system install is still
+/// preferred over the bundled copy, then (3) the bundled sidecar binary
+/// (`resolve_pult_path` below carries the actual precedence logic, kept
+/// AppHandle-free so it's unit testable). The sidecar's checksum is
+/// verified once, at package time (`scripts/fetch-pult-sidecar.mjs` against
+/// `src-tauri/sidecar.json`), not at runtime — by the time it's sitting
+/// next to the app's executable inside a distributed bundle, re-checking it
+/// on every launch would only catch tampering with the user's own install,
+/// which isn't a threat model this app defends against.
 pub fn resolve_pult(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Some(configured) = stored_pult_path(app) {
+    resolve_pult_path(
+        stored_pult_path(app),
+        || which::which("pult").ok(),
+        sidecar_candidate().unwrap_or_default(),
+    )
+}
+
+/// The precedence logic behind [`resolve_pult`], factored out so it's
+/// testable without an `AppHandle`: `configured` is the settings-store
+/// override (if any), `which_pult` looks it up on PATH, and `sidecar` is
+/// the candidate sidecar path (checked with `is_file`, so an empty/missing
+/// path — e.g. when [`sidecar_candidate`] couldn't determine one — just
+/// falls through to the final error rather than needing an `Option`).
+fn resolve_pult_path(
+    configured: Option<String>,
+    which_pult: impl FnOnce() -> Option<PathBuf>,
+    sidecar: PathBuf,
+) -> Result<PathBuf, String> {
+    if let Some(configured) = configured {
         let p = PathBuf::from(&configured);
         if p.is_file() {
             return Ok(p);
@@ -77,7 +96,46 @@ pub fn resolve_pult(app: &AppHandle) -> Result<PathBuf, String> {
             "The configured pult path doesn't exist: {configured}. Fix it in Settings."
         ));
     }
-    which::which("pult").map_err(|_| "Install pult or set its path in Settings".to_string())
+    if let Some(p) = which_pult() {
+        return Ok(p);
+    }
+    if sidecar.is_file() {
+        return Ok(sidecar);
+    }
+    Err(
+        "pult isn't installed, isn't on PATH, and no bundled copy was found. Install pult or set its path in Settings."
+            .to_string(),
+    )
+}
+
+/// The bundled sidecar's expected filename — Tauri's `externalBin` naming
+/// convention strips the target-triple suffix and appends `.exe` on
+/// Windows when it copies the resource next to the app's own executable.
+fn sidecar_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "pult.exe"
+    } else {
+        "pult"
+    }
+}
+
+/// Where the sidecar binary would live inside `dir` — factored out from
+/// [`sidecar_candidate`] so the naming convention is testable without
+/// touching `current_exe`.
+fn sidecar_path_in(dir: &std::path::Path) -> PathBuf {
+    dir.join(sidecar_binary_name())
+}
+
+/// The bundled sidecar's candidate path: next to the running app's own
+/// executable, which is where Tauri places every `externalBin` resource
+/// for every bundle type we ship (`.app`/`.dmg`, NSIS, `.deb`, AppImage —
+/// all place resources relative to the main executable's directory, not a
+/// separate `Resources`-style folder). Returns `None` only if the OS can't
+/// even tell us our own executable's path.
+fn sidecar_candidate() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    Some(sidecar_path_in(dir))
 }
 
 /// Run `pult <args>` in `dir`, optionally feeding `stdin_data`, and capture
@@ -338,6 +396,74 @@ async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_path_in_uses_the_platform_binary_name() {
+        let dir = std::path::Path::new("/some/app/dir");
+        let candidate = sidecar_path_in(dir);
+        assert_eq!(candidate.parent(), Some(dir));
+        assert_eq!(candidate.file_name().unwrap(), sidecar_binary_name());
+        #[cfg(windows)]
+        assert_eq!(candidate.file_name().unwrap(), "pult.exe");
+        #[cfg(not(windows))]
+        assert_eq!(candidate.file_name().unwrap(), "pult");
+    }
+
+    #[test]
+    fn resolve_pult_path_prefers_a_valid_configured_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let configured = dir.path().join("my-pult");
+        std::fs::write(&configured, b"").unwrap();
+
+        let result = resolve_pult_path(
+            Some(configured.to_string_lossy().to_string()),
+            || panic!("PATH shouldn't be consulted when an override is configured"),
+            dir.path().join("sidecar-should-not-be-used"),
+        );
+        assert_eq!(result.unwrap(), configured);
+    }
+
+    #[test]
+    fn resolve_pult_path_errors_on_a_configured_override_that_does_not_exist() {
+        let result = resolve_pult_path(
+            Some("/nonexistent/pult".to_string()),
+            || panic!("PATH shouldn't be consulted when an override is configured"),
+            PathBuf::new(),
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("/nonexistent/pult"), "error was: {err}");
+    }
+
+    #[test]
+    fn resolve_pult_path_prefers_path_over_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = dir.path().join("path-pult");
+        let sidecar = dir.path().join("sidecar-pult");
+        std::fs::write(&on_path, b"").unwrap();
+        std::fs::write(&sidecar, b"").unwrap();
+
+        let result = resolve_pult_path(None, || Some(on_path.clone()), sidecar);
+        assert_eq!(result.unwrap(), on_path);
+    }
+
+    #[test]
+    fn resolve_pult_path_falls_back_to_the_sidecar_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join(sidecar_binary_name());
+        std::fs::write(&sidecar, b"").unwrap();
+
+        let result = resolve_pult_path(None, || None, sidecar.clone());
+        assert_eq!(result.unwrap(), sidecar);
+    }
+
+    #[test]
+    fn resolve_pult_path_errors_when_nothing_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_sidecar = dir.path().join("not-actually-there");
+
+        let err = resolve_pult_path(None, || None, missing_sidecar).unwrap_err();
+        assert!(err.contains("Install pult"), "error was: {err}");
+    }
 
     #[test]
     fn interpolate_source_substitutes_depends_on_values_shell_quoted() {

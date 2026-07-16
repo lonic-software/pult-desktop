@@ -51,9 +51,11 @@ call rather than accepting a frontend-supplied flag.
 
 ## Dev setup
 
-Requires Node 20+ and a Rust toolchain (stable). `pult` itself is **not**
-bundled — see "Sidecar bundling" below — so you need a `pult` binary on your
-`PATH`, or point Settings at one.
+Requires Node 20+ and a Rust toolchain (stable). `pult` doesn't need to be
+installed separately — `npm run tauri dev`/`tauri build` fetch a pinned,
+checksummed release binary automatically and bundle it as a sidecar (see
+"Sidecar bundling" below); a `PATH` install or a path set in Settings is
+still preferred over it when present.
 
 ```sh
 npm install
@@ -68,6 +70,13 @@ npm run check         # svelte-check
 cd src-tauri && cargo check   # Rust typecheck
 cd src-tauri && cargo test    # backend integration tests (see below)
 ```
+
+`cargo` invoked directly (as above) skips the Tauri CLI's fetch hook, so the
+sidecar binary needs to already exist once — run `npm run tauri dev` first,
+or `node scripts/fetch-pult-sidecar.mjs` directly. This is because
+`bundle.externalBin` (see "Sidecar bundling") makes Tauri's build script
+validate that the resource exists on *every* build of the `src-tauri` crate,
+not just `tauri build`.
 
 ## Mock mode
 
@@ -267,14 +276,73 @@ descriptions than the design mockup's placeholders) allows.
   `runs` map).
 - `interactive: true` commands refuse to run in-app with an explanatory hint
   (run it in a real terminal instead — no pty in v0)
-- `pult` binary resolution: `which pult`, overridable in Settings (stored via
-  `tauri-plugin-store`)
+- `pult` binary resolution: settings override → `which pult` on PATH → a
+  bundled sidecar binary, so the app works with no separate install (see
+  "Sidecar bundling" below)
 
 **Not wired up yet** (see "Next steps"):
 
-- Sidecar bundling
 - A pty-backed runner for `interactive` commands
 - `PULT_EVENTS` step-ladder rendering (progress/status/step events)
+
+## Sidecar bundling
+
+pult-desktop ships a checksummed `pult` release binary inside the app
+bundle, so it works with no separate `pult` install. `src-tauri/src/pult_bin.rs`'s
+`resolve_pult` resolves the binary to run in this order:
+
+1. A path saved in Settings (`tauri-plugin-store`) — an explicit user choice
+   always wins.
+2. `which pult` on the user's `PATH` — a system install is still preferred
+   over the bundled copy.
+3. The bundled sidecar, next to the app's own executable — the fallback
+   that makes the app work out of the box.
+
+The sidecar itself: `src-tauri/sidecar.json` pins the bundled pult version
+and the sha256 of each target triple's release asset (independently
+computed against the downloaded bytes when pinned — not just copied from
+the release's own `checksums.txt`, since that only guards against
+corruption, not a compromised upload). `scripts/fetch-pult-sidecar.mjs`
+reads that manifest, downloads the asset for one target triple (arg,
+`$TAURI_ENV_TARGET_TRIPLE`, or host detection), verifies its checksum
+(hard failure on mismatch), extracts it, and writes
+`src-tauri/binaries/pult-<target-triple>[.exe]` — the naming convention
+`tauri.conf.json`'s `bundle.externalBin` expects, which it later strips
+back down to `pult`/`pult.exe` when copying the resource next to the app's
+executable in every bundle type we ship (`.app`, NSIS, `.deb`, AppImage).
+Already-correct downloads/binaries are skipped, so re-running the script
+locally is cheap. Checksums are verified once, at package time — not
+re-checked at runtime, since by the time the sidecar is sitting inside a
+distributed bundle, that would only catch tampering with the user's own
+install.
+
+The fetch script is wired into both `beforeDevCommand` and
+`beforeBuildCommand` in `tauri.conf.json`: once `externalBin` is
+configured, Tauri's build script validates the resource exists on *every*
+`cargo build`/`check`/`clippy`/`test` of the `src-tauri` crate, not only
+`tauri build` — so `tauri dev` needs it too, not just packaging. Running
+`cargo` directly (bypassing the Tauri CLI, e.g. plain `cargo check`) skips
+this hook, so the binary needs to already exist from a prior
+`npm run tauri dev` or a manual `node scripts/fetch-pult-sidecar.mjs` run.
+
+**Bumping the bundled pult version**: edit `src-tauri/sidecar.json` —
+update `version`, then replace every asset's `sha256` with the checksum of
+the new release's asset (download each one and run `shasum -a 256` on it
+yourself). Nothing else needs to change.
+
+CI's release workflow (`.github/workflows/release.yml`) needs no changes:
+`tauri-action` runs `tauri build`, which fires `beforeBuildCommand`, and the
+Tauri CLI sets `TAURI_ENV_TARGET_TRIPLE` to the actual build target even
+when it differs from the runner's host architecture — verified directly by
+running `tauri build --target x86_64-apple-darwin` on an aarch64 runner and
+confirming the hook saw `TAURI_ENV_TARGET_TRIPLE=x86_64-apple-darwin`. This
+is what makes the macOS matrix's two explicit `--target` builds (Apple
+Silicon and Intel, both possibly running on the same arm64 runner) fetch
+the correct sidecar for each. CI's lint workflow (`ci.yml`) *does* need a
+step, though: `cargo clippy` runs directly, not through the Tauri CLI, so
+nothing sets `TAURI_ENV_TARGET_TRIPLE` or runs the fetch hook for it — the
+`rust` job fetches the sidecar for the runner's own host triple before
+linting.
 
 ## Next steps
 
@@ -286,13 +354,6 @@ descriptions than the design mockup's placeholders) allows.
   should claim that channel itself (pult passes it through untouched when
   already set — see docs/reference.md's Events protocol) and render a live
   step/percentage indicator instead of just raw output lines.
-- **Sidecar bundling** — ship a checksummed `pult` release binary alongside
-  the app as a Tauri sidecar, so pult-desktop works with no separate
-  install. Planned shape: fetch the platform-appropriate release asset at
-  package time, verify its checksum, register it via `tauri.conf.json`'s
-  `bundle.externalBin`, and prefer it in `pult_bin::resolve_pult` when no
-  user override and no `PATH` binary are more specific. Left as comments in
-  `src-tauri/src/pult_bin.rs` for now.
 - **Packaging/signing** — code signing and notarization (macOS), and
   installer generation for the other platforms, once the app is otherwise
   stable.

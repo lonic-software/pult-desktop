@@ -61,6 +61,20 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Fetch pult sidecar
+        # `bundle.externalBin` makes tauri-build's build script check for
+        # this resource on every `cargo build`/`check`/`clippy`/`test` of
+        # the src-tauri crate, not just `tauri build` — see
+        # scripts/fetch-pult-sidecar.mjs and the README's "Sidecar
+        # bundling" section. The fetch script is Node-builtins-only (no
+        # node_modules needed) and ubuntu-22.04 runners ship Node 20+
+        # preinstalled, so no setup-node/npm ci step is needed here.
+        # TAURI_ENV_TARGET_TRIPLE isn't set here (only the Tauri CLI's
+        # beforeBuildCommand/beforeDevCommand hooks set it), so this falls
+        # back to host detection, which matches this runner's default
+        # build target anyway.
+        run: node scripts/fetch-pult-sidecar.mjs
+
       - name: cargo clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings

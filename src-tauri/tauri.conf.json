@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.lonic.pultdesktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node scripts/fetch-pult-sidecar.mjs && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "node scripts/fetch-pult-sidecar.mjs && npm run build",
     "frontendDist": "../build"
   },
   "app": {
@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": ["app", "dmg", "nsis", "deb", "appimage"],
+    "externalBin": ["binaries/pult"],
     "publisher": "Lonic Software",
     "homepage": "https://github.com/lonic-software/pult-desktop",
     "license": "MIT",
