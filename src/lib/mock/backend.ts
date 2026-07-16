@@ -89,6 +89,16 @@ const MOCK_RUN_LOG: Record<string, string[]> = {
   ],
 };
 
+// Run ids `stopRun` has been asked to stop — `runCommand`'s loop below
+// checks this before each emitted line so a mock run can be interrupted the
+// same way a real one can, without any real process behind it to signal.
+const stoppedRuns = new Set<string>();
+
+export async function stopRun(runId: string): Promise<void> {
+  await delay(80);
+  stoppedRuns.add(runId);
+}
+
 export async function runCommand(
   _path: string,
   id: string,
@@ -99,8 +109,13 @@ export async function runCommand(
   const lines = MOCK_RUN_LOG[id] ?? ["running…", "done"];
   for (const text of lines) {
     await delay(180);
+    if (stoppedRuns.has(runId)) {
+      stoppedRuns.delete(runId);
+      onEvent({ kind: "exit", run_id: runId, code: null, stopped: true });
+      return;
+    }
     onEvent({ kind: "line", run_id: runId, stream: "stdout", text });
   }
   await delay(120);
-  onEvent({ kind: "exit", run_id: runId, code: 0 });
+  onEvent({ kind: "exit", run_id: runId, code: 0, stopped: false });
 }

@@ -64,3 +64,10 @@ export async function runCommand(
     unlisten();
   }
 }
+
+// Stop a run started by `runCommand`. `run_id` isn't scoped to a repo path
+// here — the backend's `RunRegistry` is keyed by run_id alone (see
+// `stop_run` in src-tauri/src/commands.rs) — so this is just a pass-through.
+export async function stopRun(runId: string): Promise<void> {
+  await invoke<void>("stop_run", { runId });
+}

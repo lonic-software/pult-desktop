@@ -29,10 +29,21 @@
   // running strips on the board and the run view's output pane both survive
   // navigating back and forth, and so more than one command can be running
   // at once (each gets its own run_id — see src/lib/types.ts's RunEvent).
+  //
+  // `step`/`progress`/`status` hold the latest event of their kind from the
+  // PULT_EVENTS channel (see RunEvent), additive alongside `lines` — nothing
+  // here renders them yet, that's the step-ladder UI phase; this just keeps
+  // them from being dropped on the floor in the meantime. `stopped`
+  // distinguishes a user-requested stop from a natural exit once `running`
+  // goes false.
   interface RunRecord {
     runId: string;
     running: boolean;
     lines: OutputLine[];
+    step: { k: number; n: number; name: string } | null;
+    progress: { pct: number | null; text: string | null } | null;
+    status: string | null;
+    stopped: boolean;
   }
 
   let repoPath: string | null = $state(null);
@@ -187,7 +198,18 @@
   async function handleRun(commandId: string, values: Record<string, string>) {
     if (!repoPath) return;
     const runId = crypto.randomUUID();
-    runs = { ...runs, [commandId]: { runId, running: true, lines: [] } };
+    runs = {
+      ...runs,
+      [commandId]: {
+        runId,
+        running: true,
+        lines: [],
+        step: null,
+        progress: null,
+        status: null,
+        stopped: false,
+      },
+    };
 
     function appendLine(line: OutputLine) {
       const current = runs[commandId];
@@ -195,25 +217,43 @@
       runs = { ...runs, [commandId]: { ...current, lines: [...current.lines, line] } };
     }
 
-    function finish(line: OutputLine) {
+    function updateRecord(patch: Partial<Pick<RunRecord, "step" | "progress" | "status">>) {
+      const current = runs[commandId];
+      if (!current || current.runId !== runId) return;
+      runs = { ...runs, [commandId]: { ...current, ...patch } };
+    }
+
+    function finish(line: OutputLine, stopped: boolean) {
       const current = runs[commandId];
       if (!current || current.runId !== runId) return;
       runs = {
         ...runs,
-        [commandId]: { ...current, running: false, lines: [...current.lines, line] },
+        [commandId]: { ...current, running: false, stopped, lines: [...current.lines, line] },
       };
     }
 
     try {
       await runCommand(repoPath, commandId, values, runId, (event: RunEvent) => {
-        if (event.kind === "line") {
-          appendLine({ stream: event.stream, text: event.text });
-        } else {
-          finish({ stream: "exit", text: `Exit code: ${event.code ?? "unknown"}` });
+        switch (event.kind) {
+          case "line":
+            appendLine({ stream: event.stream, text: event.text });
+            break;
+          case "step":
+            updateRecord({ step: { k: event.k, n: event.n, name: event.name } });
+            break;
+          case "progress":
+            updateRecord({ progress: { pct: event.pct, text: event.text } });
+            break;
+          case "status":
+            updateRecord({ status: event.text });
+            break;
+          case "exit":
+            finish({ stream: "exit", text: `Exit code: ${event.code ?? "unknown"}` }, event.stopped);
+            break;
         }
       });
     } catch (e) {
-      finish({ stream: "exit", text: String(e) });
+      finish({ stream: "exit", text: String(e) }, false);
     }
   }
 

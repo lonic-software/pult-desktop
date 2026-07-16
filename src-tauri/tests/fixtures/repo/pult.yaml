@@ -6,6 +6,21 @@ includes:
   - source: ./mods/aws
     prefix: aws
 
+# Named steps for `pipeline` below — a list-form `run:` compiles a guarded
+# `step k/n <name>` emission before each one automatically (pult repo's
+# docs/reference.md, "Events protocol" — "Compiled step lists emit `step`
+# events automatically"), and each step here also emits an explicit
+# `progress`/`status` line itself, guarded per the same doc's pattern
+# (`[ -n "${PULT_EVENTS:-}" ] && … >&$PULT_EVENTS`) — exercising all three
+# verbs (step, progress, status) from one fixture command.
+steps:
+  build-step: |
+    [ -n "${PULT_EVENTS:-}" ] && echo "progress 50 building" >&$PULT_EVENTS
+    echo "build output"
+  release-step: |
+    [ -n "${PULT_EVENTS:-}" ] && echo "status releasing now" >&$PULT_EVENTS
+    echo "release output"
+
 commands:
   - id: shell
     title: Open a shell
@@ -28,3 +43,14 @@ commands:
       note: { input: { default: "" } }
     check: "command -v this-tool-does-not-exist-xyz"
     run: "echo importing with token {token} note {note}"
+
+  - id: pipeline
+    title: Run pipeline
+    run:
+      - use: build-step
+      - use: release-step
+    check: "command -v sh"
+
+  - id: sleep-loop
+    title: Sleep loop
+    run: "while true; do sleep 1; done"

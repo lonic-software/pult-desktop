@@ -1,4 +1,5 @@
 mod commands;
+pub mod events;
 pub mod pult_bin;
 pub mod types;
 
@@ -20,6 +21,9 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // In-flight runs, keyed by run_id, so `stop_run` can find the one it
+        // was asked to stop — see `pult_bin::RunRegistry`.
+        .manage(pult_bin::RunRegistry::new())
         .invoke_handler(tauri::generate_handler![
             commands::open_repo,
             commands::trust_repo,
@@ -28,6 +32,7 @@ pub fn run() {
             commands::get_pult_path,
             commands::set_pult_path,
             commands::run_command,
+            commands::stop_run,
             commands::resolve_pick_source,
         ])
         .run(tauri::generate_context!())

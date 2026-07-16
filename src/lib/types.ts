@@ -70,9 +70,19 @@ export interface DoctorReport {
 // echoed back on every event, so the frontend can tell concurrent runs
 // apart on the one shared `pult://run-output` channel — see
 // src-tauri/src/types.rs's RunEvent doc comment.
+//
+// `step`/`progress`/`status` come from pult's `PULT_EVENTS` channel (the
+// pult repo's docs/reference.md, "Events protocol — PULT_EVENTS"), which
+// this app claims itself — see `run_streaming` in src-tauri/src/pult_bin.rs.
+// Unix only: on Windows nothing sets `PULT_EVENTS`, so these three kinds
+// simply never arrive there; stdout/stderr `line`s and the terminal `exit`
+// still do.
 export type RunEvent =
   | { kind: "line"; run_id: string; stream: "stdout" | "stderr"; text: string }
-  | { kind: "exit"; run_id: string; code: number | null };
+  | { kind: "step"; run_id: string; k: number; n: number; name: string }
+  | { kind: "progress"; run_id: string; pct: number | null; text: string | null }
+  | { kind: "status"; run_id: string; text: string }
+  | { kind: "exit"; run_id: string; code: number | null; stopped: boolean };
 
 /** A command's readiness lamp state, derived from doctor + trust.
  *  "no-check" is the confirmed case (doctor answered, `check:` is null) —

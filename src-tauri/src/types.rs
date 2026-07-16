@@ -117,8 +117,10 @@ pub struct DoctorReport {
     pub commands: Vec<DoctorEntry>,
 }
 
-/// A line of output streamed while a command runs, plus the terminal exit
-/// event. Emitted on the `pult://run-output` Tauri event channel.
+/// A line of output streamed while a command runs, the machine events pult
+/// may emit on its `PULT_EVENTS` channel (see `crate::events` and
+/// `pult_bin::run_streaming`), plus the terminal exit event. Emitted on the
+/// `pult://run-output` Tauri event channel.
 ///
 /// `run_id` is a client-generated id (one per `run_command` invocation),
 /// threaded through so the frontend can tell concurrent runs apart — the
@@ -132,8 +134,36 @@ pub enum RunEvent {
         stream: String,
         text: String,
     },
+    /// `step <k>/<n> <name>` from the `PULT_EVENTS` channel — entering step
+    /// `k` of `n` (1-based). Unix only: this app only claims the channel on
+    /// unix (see `pult_bin::run_streaming`), so this never fires on Windows.
+    Step {
+        run_id: String,
+        k: u32,
+        n: u32,
+        name: String,
+    },
+    /// `progress <0-100|?> [text]` from the `PULT_EVENTS` channel —
+    /// `pct: None` is the indeterminate `?` form. Unix only, same caveat as
+    /// `Step`.
+    Progress {
+        run_id: String,
+        pct: Option<u8>,
+        text: Option<String>,
+    },
+    /// `status <text>` from the `PULT_EVENTS` channel — a transient activity
+    /// line. Unix only, same caveat as `Step`.
+    Status {
+        run_id: String,
+        text: String,
+    },
     Exit {
         run_id: String,
         code: Option<i32>,
+        /// Whether this run ended because `stop_run` was called, rather than
+        /// the command exiting on its own — lets the UI show "stopped" as
+        /// distinct from a natural (possibly non-zero, possibly signal-killed
+        /// from outside this app) exit.
+        stopped: bool,
     },
 }
