@@ -31,6 +31,35 @@ commands:
     interactive: true
     run: "npm run tauri dev"
 
+  - id: mock
+    title: Run the mock board
+    category: Develop
+    description: >-
+      Serves the frontend alone in a browser at http://localhost:1420, backed
+      by a scripted fake backend instead of the real Tauri shell — no pult
+      binary or Tauri build needed. The demo runs cover a determinate
+      progress bar with stages (aws:deploy), an indeterminate one (status), a
+      run that fails (import), and a stoppable long-running one (test:smoke).
+      Opens your browser automatically and blocks until you Ctrl+C.
+    check: "command -v npm"
+    interactive: true
+    run: "VITE_MOCK=1 npm run dev -- --open"
+
+  - id: mock-app
+    title: Run the mock app
+    category: Develop
+    description: >-
+      Same demo backend as `mock`, but inside the real Tauri desktop window
+      instead of a browser — VITE_MOCK is read by the frontend at Vite dev
+      time, so the app shell runs normally while the frontend uses the
+      scripted fake backend. The same demo runs as `mock` (aws:deploy
+      determinate+stages, status indeterminate, import failing, test:smoke
+      stoppable). The first run compiles the Rust side, so the window takes
+      longer to appear, and it blocks until you Ctrl+C.
+    check: "command -v npm && command -v cargo"
+    interactive: true
+    run: "VITE_MOCK=1 npm run tauri dev"
+
   - id: build
     title: Build bundles
     category: Ship
