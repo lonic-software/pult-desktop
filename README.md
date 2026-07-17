@@ -299,10 +299,24 @@ currently running shows a slim indeterminate amber strip along the pad's
 bottom edge and swaps its footer marker for "Running…" (given more room
 than the static marker it replaces) — and that state survives navigating
 away, since run state lives above the board/run-view switch (see
-`src/routes/+page.svelte`), letting more than one command run at once. The
-toolbar (repo name, "Open repository…", search) keeps the same raised-
-button / recessed-search-input language; search filters cards live across
-modules, hides empty ones, and shows a "no matches" state.
+`src/routes/+page.svelte`), letting more than one command run at once —
+run state is kept per device, so a run keeps streaming even while another
+device is active in the rack. The toolbar (active device name, search)
+keeps the same raised-button / recessed-search-input language; search
+filters cards live across modules, hides empty ones, and shows a "no
+matches" state.
+
+**Rack** (design 4a): the left sidebar is a rack of mounted *devices* —
+each device is a repository, persisted across launches (`rack.json` via
+tauri-plugin-store, see `src/lib/real/rackStore.ts`) with the last-active
+device re-opened on launch. A device card shows a status lamp (green =
+active, amber = a run streaming in a background device, red = untrusted or
+unavailable), the repo path, and an "N instruments" count; hovering
+reveals an eject control (ejecting stops any of its still-running
+commands). The dashed "Mount device" bay below the cards is the add-repo
+affordance — the toolbar no longer has an "Open repository…" button; the
+rack owns that. The sidebar collapses to a thin rail (persisted in
+localStorage).
 
 **Run view** is what clicking a card opens: a focused takeover of the
 content area (not a modal) with a "← Board" control (also `Esc`), an

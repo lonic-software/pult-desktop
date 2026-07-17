@@ -3,7 +3,6 @@
     repoName: string | null;
     search: string;
     theme: "system" | "light" | "dark";
-    onOpenRepo: () => void;
     onSearch: (value: string) => void;
     onToggleTheme: () => void;
     onOpenSettings: () => void;
@@ -25,7 +24,6 @@
     repoName,
     search,
     theme,
-    onOpenRepo,
     onSearch,
     onToggleTheme,
     onOpenSettings,
@@ -40,11 +38,12 @@
     {#if onBack}
       <button type="button" class="back-btn micro" onclick={onBack}>← Board</button>
     {/if}
+    <!-- Mounting/switching devices lives in the rack sidebar (design 4a) —
+         the toolbar just names what's active. -->
     <span class="repo-name mono"
-      >{repoName ?? "No repository open"}{#if breadcrumb}<span class="crumb-sep">/</span
+      >{repoName ?? "No device active"}{#if breadcrumb}<span class="crumb-sep">/</span
         >{breadcrumb.source}<span class="crumb-sep">/</span>{breadcrumb.category}{/if}</span
     >
-    <button type="button" class="micro" onclick={onOpenRepo}>Open repository…</button>
     <input
       class="search micro"
       type="search"

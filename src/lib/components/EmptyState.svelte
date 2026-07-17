@@ -1,16 +1,16 @@
 <script lang="ts">
   interface Props {
     message: string;
-    onOpenRepo?: () => void;
+    onMountDevice?: () => void;
   }
 
-  let { message, onOpenRepo }: Props = $props();
+  let { message, onMountDevice }: Props = $props();
 </script>
 
 <div class="empty">
   <p>{message}</p>
-  {#if onOpenRepo}
-    <button type="button" class="micro" onclick={onOpenRepo}>Open repository…</button>
+  {#if onMountDevice}
+    <button type="button" class="micro" onclick={onMountDevice}>Mount device…</button>
   {/if}
 </div>
 

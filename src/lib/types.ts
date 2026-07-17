@@ -135,3 +135,27 @@ export interface RunRecord {
  *  distinct from "none", which means "nothing known yet" (doctor hasn't
  *  answered, or this command has no doctor entry at all). */
 export type Readiness = "ready" | "failed" | "none" | "no-check" | "untrusted";
+
+// A repository mounted in the rack (design 4a) — the persisted list entry,
+// not live state. `name`/`instruments`/`status` are a cache of the last
+// successful/failed open so the rack can label a device without opening it:
+// stale until the next `openRepo` of that path refreshes them.
+export interface RackDevice {
+  path: string;
+  /** Display name — the listing's `name` once the device has been opened,
+   *  the folder's basename until then. */
+  name: string;
+  /** Command count from the last open, or null before the first one. Shown
+   *  as "N instruments" in the rack (the design's word for commands). */
+  instruments: number | null;
+  /** Outcome of the last open: null before the first attempt. "error" means
+   *  `openRepo` itself failed (folder gone, no pult.yaml, …). */
+  status: "ok" | "untrusted" | "error" | null;
+}
+
+export interface RackState {
+  devices: RackDevice[];
+  /** Path of the device that was active when last persisted — re-opened
+   *  automatically on the next launch. Null when nothing was open. */
+  activePath: string | null;
+}

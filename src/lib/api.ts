@@ -10,9 +10,12 @@ import * as mockBackend from "./mock/backend";
 import * as realBackend from "./real/backend";
 import * as mockParamStore from "./mock/paramStore";
 import * as realParamStore from "./real/paramStore";
+import * as mockRackStore from "./mock/rackStore";
+import * as realRackStore from "./real/rackStore";
 
 const backend = isMock ? mockBackend : realBackend;
 const paramStore = isMock ? mockParamStore : realParamStore;
+const rackStore = isMock ? mockRackStore : realRackStore;
 
 export const pickFolder = backend.pickFolder;
 export const openRepo = backend.openRepo;
@@ -30,3 +33,8 @@ export const resolvePickSource = backend.resolvePickSource;
 // promise. Never call `saveParamValue` for a `param.secret` field.
 export const loadParamValues = paramStore.loadParamValues;
 export const saveParamValue = paramStore.saveParamValue;
+
+// Rack persistence (design 4a — see ./real/rackStore.ts): the mounted-device
+// list and last-active device, restored on launch.
+export const loadRack = rackStore.loadRack;
+export const saveRack = rackStore.saveRack;

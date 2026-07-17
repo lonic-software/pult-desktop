@@ -8,7 +8,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { DoctorReport, Listing, RunEvent } from "../types";
 
 export async function pickFolder(): Promise<string | null> {
-  const result = await open({ directory: true, multiple: false, title: "Open repository" });
+  const result = await open({ directory: true, multiple: false, title: "Mount a repository" });
   return typeof result === "string" ? result : null;
 }
 

@@ -4,20 +4,31 @@
     doctorCheck,
     getPultPath,
     isMock,
+    loadRack,
     openRepo,
     pickFolder,
     pultVersion,
     runCommand,
+    saveRack,
     setPultPath,
     stopRun,
     trustRepo,
   } from "$lib/api";
-  import type { CommandInfo, DoctorReport, Listing, OutputLine, RunEvent, RunRecord } from "$lib/types";
+  import type {
+    CommandInfo,
+    DoctorReport,
+    Listing,
+    OutputLine,
+    RackDevice,
+    RunEvent,
+    RunRecord,
+  } from "$lib/types";
   import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
   import { formatDuration } from "$lib/time";
   import type { BoardMeterOverride } from "$lib/readiness";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
   import Toolbar from "$lib/components/Toolbar.svelte";
+  import Rack from "$lib/components/Rack.svelte";
   import Board from "$lib/components/Board.svelte";
   import RunView from "$lib/components/RunView.svelte";
   import TrustModal from "$lib/components/TrustModal.svelte";
@@ -32,47 +43,103 @@
   let view: "board" | "run" = $state("board");
   let showTrustModal = $state(false);
   let trustBusy = $state(false);
-  let readOnly = $state(false);
   let showSettings = $state(false);
   let pultPathSetting: string | null = $state(null);
   let versionInfo: string | null = $state(null);
   let search = $state("");
   let theme: "system" | "light" | "dark" = $state("system");
-  let runs: Record<string, RunRecord> = $state({});
-  // The board's post-run transient/latch overlay per command id — see
-  // readiness.ts's `BoardMeterOverride` doc comment for the pure state math
-  // this drives; this is the timer/acknowledgment bookkeeping around it,
-  // kept alongside `runs` (same session-scoped, per-repo lifetime — reset on
-  // `loadRepo`, never persisted). `success`/`stopped` self-clear via
-  // `boardOverrideTimers` below, once each has finished its own blink
-  // sequence (docs/design-language.md's "Blink is a mode" — see
-  // Meter.svelte's `isBlinking`); `run-failed` only clears on acknowledgment
-  // (see the `$effect` near the bottom of this block). The two durations
-  // below are each an iteration-count × meterLiveness.ts's BLINK_PERIOD_MS,
-  // so they exactly cover Meter.svelte's `.well.glow-success`/
-  // `.well.glow-stopped` animation-iteration-count — a mismatch here would
-  // either clip the last blink or leave a stretch of steady color sitting
-  // after the CSS animation already finished.
-  let boardOverrides: Record<string, BoardMeterOverride | null> = $state({});
+
+  // The rack (design 4a): the persisted list of mounted devices (repos) and
+  // which one is active. `devices` mirrors the rack.json store — every
+  // mutation goes through `persistRack` so the list survives restarts and
+  // the last-active device re-opens on launch (see onMount).
+  let devices: RackDevice[] = $state([]);
+  let rackCollapsed = $state(false);
+
+  // Paths where the user clicked "Not now" on the trust modal this session —
+  // suppresses re-prompting on every switch back to that device. Read only
+  // inside `loadRepo`, so a plain Set (no reactivity needed).
+  const readOnlyPaths = new Set<string>();
+
+  // Per-device session state, keyed by repo path — NOT reset on device
+  // switch, so a run kicked off in one device keeps streaming while another
+  // is active, and switching back finds its output (plus the rack's amber
+  // "running…" lamp meanwhile). Everything below the maps derives the
+  // active device's slice, which is what the board/run view render.
+  let runsByRepo: Record<string, Record<string, RunRecord>> = $state({});
+  let overridesByRepo: Record<string, Record<string, BoardMeterOverride | null>> = $state({});
+  let paramValuesByRepo: Record<string, Record<string, Record<string, string>>> = $state({});
+
+  const runs: Record<string, RunRecord> = $derived(
+    repoPath ? (runsByRepo[repoPath] ?? {}) : {},
+  );
+  const boardOverrides: Record<string, BoardMeterOverride | null> = $derived(
+    repoPath ? (overridesByRepo[repoPath] ?? {}) : {},
+  );
+  // In-session param form values only — RunView hydrates them from per-repo
+  // disk persistence (loadParamValues) on open and writes non-secret edits
+  // back (saveParamValue), which is what the parameters module's
+  // "remembered per repo" footer note promises — see RunView.
+  const paramValues: Record<string, Record<string, string>> = $derived(
+    repoPath ? (paramValuesByRepo[repoPath] ?? {}) : {},
+  );
+
+  // Devices with at least one in-flight run — drives the rack's amber lamp.
+  const runningPaths: ReadonlySet<string> = $derived(
+    new Set(
+      Object.entries(runsByRepo)
+        .filter(([, byCommand]) => Object.values(byCommand).some((r) => r.running))
+        .map(([path]) => path),
+    ),
+  );
+  // The board's post-run transient/latch overlay per command id (inside the
+  // per-device `overridesByRepo` map above) — see readiness.ts's
+  // `BoardMeterOverride` doc comment for the pure state math this drives;
+  // this is the timer/acknowledgment bookkeeping around it, kept alongside
+  // `runsByRepo` (same session-scoped, per-device lifetime — kept across
+  // device switches, dropped on eject, never persisted). `success`/`stopped`
+  // self-clear via `boardOverrideTimers` below (keyed `<path>\0<commandId>`,
+  // since a blink can finish while its device sits inactive in the rack),
+  // once each has finished its own blink sequence (docs/design-language.md's
+  // "Blink is a mode" — see Meter.svelte's `isBlinking`); `run-failed` only
+  // clears on acknowledgment (see the `$effect` near the bottom of this
+  // block). The two durations below are each an iteration-count ×
+  // meterLiveness.ts's BLINK_PERIOD_MS, so they exactly cover Meter.svelte's
+  // `.well.glow-success`/`.well.glow-stopped` animation-iteration-count — a
+  // mismatch here would either clip the last blink or leave a stretch of
+  // steady color sitting after the CSS animation already finished.
   const boardOverrideTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const SUCCESS_PULSE_MS = SUCCESS_BLINK_COUNT * BLINK_PERIOD_MS;
   const STOP_FLASH_MS = STOPPED_BLINK_COUNT * BLINK_PERIOD_MS;
 
-  function setBoardOverride(commandId: string, override: BoardMeterOverride | null) {
-    boardOverrides = { ...boardOverrides, [commandId]: override };
+  function timerKey(path: string, commandId: string): string {
+    return `${path}\0${commandId}`;
   }
 
-  function scheduleOverrideClear(commandId: string, kind: BoardMeterOverride["kind"], ms: number) {
-    const existing = boardOverrideTimers.get(commandId);
+  function setBoardOverride(path: string, commandId: string, override: BoardMeterOverride | null) {
+    const forRepo = overridesByRepo[path] ?? {};
+    overridesByRepo = { ...overridesByRepo, [path]: { ...forRepo, [commandId]: override } };
+  }
+
+  function scheduleOverrideClear(
+    path: string,
+    commandId: string,
+    kind: BoardMeterOverride["kind"],
+    ms: number,
+  ) {
+    const key = timerKey(path, commandId);
+    const existing = boardOverrideTimers.get(key);
     if (existing) clearTimeout(existing);
     const handle = setTimeout(() => {
-      boardOverrideTimers.delete(commandId);
+      boardOverrideTimers.delete(key);
       // Only clear if it's still the same transient overlay — a newer run
       // (or a newer overlay from this same run finishing again, though that
       // can't actually happen) must never be clobbered by a stale timer.
-      if (boardOverrides[commandId]?.kind === kind) setBoardOverride(commandId, null);
+      if (overridesByRepo[path]?.[commandId]?.kind === kind) {
+        setBoardOverride(path, commandId, null);
+      }
     }, ms);
-    boardOverrideTimers.set(commandId, handle);
+    boardOverrideTimers.set(key, handle);
   }
 
   // Applies docs/design-language.md's "Only failures latch" rule once a run
@@ -83,17 +150,18 @@
   // the details page" trigger; "starting a new run" is handled directly in
   // `handleRun`).
   function applyBoardOutcome(
+    path: string,
     commandId: string,
     outcome: { stopped: boolean; exitCode: number | null; errorText: string | null },
   ) {
     if (outcome.stopped) {
-      setBoardOverride(commandId, { kind: "stopped" });
-      scheduleOverrideClear(commandId, "stopped", STOP_FLASH_MS);
+      setBoardOverride(path, commandId, { kind: "stopped" });
+      scheduleOverrideClear(path, commandId, "stopped", STOP_FLASH_MS);
     } else if (outcome.errorText === null && outcome.exitCode === 0) {
-      setBoardOverride(commandId, { kind: "success" });
-      scheduleOverrideClear(commandId, "success", SUCCESS_PULSE_MS);
+      setBoardOverride(path, commandId, { kind: "success" });
+      scheduleOverrideClear(path, commandId, "success", SUCCESS_PULSE_MS);
     } else {
-      setBoardOverride(commandId, { kind: "run-failed" });
+      setBoardOverride(path, commandId, { kind: "run-failed" });
     }
   }
 
@@ -105,22 +173,20 @@
   // changing (a live failure while already on the page) covers both without
   // separate code paths. Trigger 3 (starting a new run) is handled directly
   // in `handleRun`, since that's a state change this effect doesn't
-  // otherwise observe as an "acknowledgment".
+  // otherwise observe as an "acknowledgment". Only ever acts on the active
+  // device — an inactive device's run view isn't showing, so its failures
+  // stay latched until visited, exactly as designed.
   $effect(() => {
-    if (view === "run" && selectedId && boardOverrides[selectedId]?.kind === "run-failed") {
-      setBoardOverride(selectedId, null);
+    if (
+      repoPath &&
+      view === "run" &&
+      selectedId &&
+      boardOverrides[selectedId]?.kind === "run-failed"
+    ) {
+      setBoardOverride(repoPath, selectedId, null);
     }
   });
 
-  // Param form values, keyed by command id — lifted up here (rather than
-  // living in RunView's own local state) so they survive navigating back to
-  // the board and re-opening the same command, same as `runs` above. This
-  // map is in-session working state only (reset on `loadRepo`); RunView
-  // hydrates it from per-repo disk persistence (loadParamValues) on open and
-  // writes non-secret edits back (saveParamValue), which is what the
-  // parameters module's "remembered per repo" footer note promises — see
-  // RunView.
-  let paramValues: Record<string, Record<string, string>> = $state({});
   // `?tooltip=<command-id>` mock-screenshot hook — see Board.svelte's
   // forceTooltipId and CommandCard.svelte's forceTooltip.
   let forceTooltipId: string | null = $state(null);
@@ -192,6 +258,32 @@
     }
   }
 
+  function basename(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? path;
+  }
+
+  function persistRack() {
+    // snapshot() strips the $state proxy before the object crosses into the
+    // store plugin's serializer.
+    void saveRack({ devices: $state.snapshot(devices), activePath: repoPath });
+  }
+
+  function upsertDevice(path: string, patch: Partial<RackDevice>) {
+    if (devices.some((d) => d.path === path)) {
+      devices = devices.map((d) => (d.path === path ? { ...d, ...patch } : d));
+    } else {
+      devices = [
+        ...devices,
+        { path, name: basename(path), instruments: null, status: null, ...patch },
+      ];
+    }
+  }
+
+  // Opens (or switches to) the device at `path`. Per-device session state
+  // (runsByRepo & co.) deliberately survives this — only the active-listing
+  // state resets. The post-await guards handle a device switch racing a slow
+  // open: the stale open's listing must never clobber the newer device's.
   async function loadRepo(path: string) {
     repoPath = path;
     listingError = null;
@@ -199,30 +291,36 @@
     doctorReport = null;
     selectedId = null;
     view = "board";
-    runs = {};
-    boardOverrides = {};
-    for (const t of boardOverrideTimers.values()) clearTimeout(t);
-    boardOverrideTimers.clear();
-    paramValues = {};
+    showTrustModal = false;
 
     try {
       const result = await openRepo(path);
+      upsertDevice(path, {
+        name: result.name || basename(path),
+        instruments: result.commands.length,
+        status: result.trusted ? "ok" : "untrusted",
+      });
+      persistRack();
+      if (repoPath !== path) return;
       listing = result;
       if (result.trusted) {
-        readOnly = false;
-        showTrustModal = false;
         await loadDoctor(path);
-      } else if (!readOnly) {
+      } else if (!readOnlyPaths.has(path)) {
         showTrustModal = true;
       }
     } catch (e) {
-      listingError = String(e);
+      upsertDevice(path, { status: "error" });
+      persistRack();
+      if (repoPath === path) listingError = String(e);
     }
   }
 
   async function loadDoctor(path: string) {
     try {
-      doctorReport = await doctorCheck(path);
+      const report = await doctorCheck(path);
+      // Same stale-switch guard as loadRepo — a slow doctor for a device
+      // the user already switched away from must not paint the new board.
+      if (repoPath === path) doctorReport = report;
     } catch (e) {
       // Readiness is a nice-to-have overlay; a failure here shouldn't block
       // browsing or running commands. Lamps just stay unlit ("No check").
@@ -230,11 +328,57 @@
     }
   }
 
-  async function handleOpenRepo() {
+  async function handleMountDevice() {
     const path = await pickFolder();
     if (!path) return;
-    readOnly = false;
+    // Re-picking an already-mounted folder just switches to it — and gives
+    // its trust prompt another chance if "Not now" was clicked earlier.
+    readOnlyPaths.delete(path);
     await loadRepo(path);
+  }
+
+  async function handleSelectDevice(path: string) {
+    if (path === repoPath) return;
+    await loadRepo(path);
+  }
+
+  function handleEjectDevice(path: string) {
+    // Eject = remove: stop anything still running in that device rather
+    // than orphaning child processes nothing will ever look at again.
+    for (const run of Object.values(runsByRepo[path] ?? {})) {
+      if (run.running) void stopRun(run.runId);
+    }
+    for (const [key, t] of [...boardOverrideTimers]) {
+      if (key.startsWith(`${path}\0`)) {
+        clearTimeout(t);
+        boardOverrideTimers.delete(key);
+      }
+    }
+    runsByRepo = omitKey(runsByRepo, path);
+    overridesByRepo = omitKey(overridesByRepo, path);
+    paramValuesByRepo = omitKey(paramValuesByRepo, path);
+    devices = devices.filter((d) => d.path !== path);
+    readOnlyPaths.delete(path);
+    if (repoPath === path) {
+      repoPath = null;
+      listing = null;
+      listingError = null;
+      doctorReport = null;
+      selectedId = null;
+      view = "board";
+      showTrustModal = false;
+    }
+    persistRack();
+  }
+
+  function omitKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+    const { [key]: _omitted, ...rest } = map;
+    return rest;
+  }
+
+  function toggleRackCollapsed() {
+    rackCollapsed = !rackCollapsed;
+    localStorage.setItem("pult-desktop:rack-collapsed", rackCollapsed ? "1" : "0");
   }
 
   async function handleTrust() {
@@ -243,7 +387,6 @@
     try {
       await trustRepo(repoPath);
       showTrustModal = false;
-      readOnly = false;
       await loadRepo(repoPath);
     } catch (e) {
       listingError = String(e);
@@ -254,7 +397,7 @@
 
   function handleNotNow() {
     showTrustModal = false;
-    readOnly = true;
+    if (repoPath) readOnlyPaths.add(repoPath);
   }
 
   function selectCommand(id: string) {
@@ -268,6 +411,11 @@
 
   async function handleRun(commandId: string, values: Record<string, string>) {
     if (!repoPath) return;
+    // Captured once: every closure below writes through `runsByRepo[path]`
+    // rather than the active-device `runs` slice, so this run keeps
+    // streaming (and finishes, and sets its board overlay) even while its
+    // device sits inactive in the rack.
+    const path = repoPath;
     const runId = crypto.randomUUID();
     // Acknowledgment trigger 3 of 3 (see docs/design-language.md): starting
     // a new run clears any latched/transient overlay left over from the
@@ -277,37 +425,48 @@
     // sitting there ready to reappear if this run somehow ended without
     // setting a new one (it can't, `finish` below always does, but clearing
     // here is the actual acknowledgment moment, not a rendering detail).
-    const existingTimer = boardOverrideTimers.get(commandId);
+    const key = timerKey(path, commandId);
+    const existingTimer = boardOverrideTimers.get(key);
     if (existingTimer) clearTimeout(existingTimer);
-    boardOverrideTimers.delete(commandId);
-    setBoardOverride(commandId, null);
-    runs = {
-      ...runs,
-      [commandId]: {
-        runId,
-        running: true,
-        lines: [],
-        step: null,
-        stepHistory: [],
-        progress: null,
-        status: null,
-        stopped: false,
-        exitCode: null,
-        startedAt: Date.now(),
-        endedAt: null,
+    boardOverrideTimers.delete(key);
+    setBoardOverride(path, commandId, null);
+    runsByRepo = {
+      ...runsByRepo,
+      [path]: {
+        ...(runsByRepo[path] ?? {}),
+        [commandId]: {
+          runId,
+          running: true,
+          lines: [],
+          step: null,
+          stepHistory: [],
+          progress: null,
+          status: null,
+          stopped: false,
+          exitCode: null,
+          startedAt: Date.now(),
+          endedAt: null,
+        },
       },
     };
 
+    // Applies `fn` to this run's record iff it's still the record this
+    // invocation created (same runId) — events from a superseded or ejected
+    // run land nowhere. Returns whether it applied.
+    function patchRun(fn: (current: RunRecord) => RunRecord): boolean {
+      const forRepo = runsByRepo[path] ?? {};
+      const current = forRepo[commandId];
+      if (!current || current.runId !== runId) return false;
+      runsByRepo = { ...runsByRepo, [path]: { ...forRepo, [commandId]: fn(current) } };
+      return true;
+    }
+
     function appendLine(line: OutputLine) {
-      const current = runs[commandId];
-      if (!current || current.runId !== runId) return;
-      runs = { ...runs, [commandId]: { ...current, lines: [...current.lines, line] } };
+      patchRun((current) => ({ ...current, lines: [...current.lines, line] }));
     }
 
     function updateRecord(patch: Partial<Pick<RunRecord, "step" | "stepHistory" | "progress" | "status">>) {
-      const current = runs[commandId];
-      if (!current || current.runId !== runId) return;
-      runs = { ...runs, [commandId]: { ...current, ...patch } };
+      patchRun((current) => ({ ...current, ...patch }));
     }
 
     // Terminal states share one summary-line shape (the output module's
@@ -316,51 +475,47 @@
     // exit and an invoke-level failure (network hiccup, backend error —
     // never a normal process exit) go through the same bookkeeping.
     function finish(exitCode: number | null, stopped: boolean, errorText: string | null) {
-      const current = runs[commandId];
-      if (!current || current.runId !== runId) return;
-      const dur = formatDuration(Date.now() - current.startedAt);
-      let text: string;
-      let outcome: "success" | "error" | "stopped";
-      if (errorText !== null) {
-        text = errorText;
-        outcome = "error";
-      } else if (stopped) {
-        text = `■ stopped after ${dur}`;
-        outcome = "stopped";
-      } else if (exitCode === 0) {
-        text = `✓ done in ${dur}`;
-        outcome = "success";
-      } else {
-        text = `✗ exited with code ${exitCode ?? "unknown"} after ${dur}`;
-        outcome = "error";
-      }
-      runs = {
-        ...runs,
-        [commandId]: {
+      const applied = patchRun((current) => {
+        const dur = formatDuration(Date.now() - current.startedAt);
+        let text: string;
+        let outcome: "success" | "error" | "stopped";
+        if (errorText !== null) {
+          text = errorText;
+          outcome = "error";
+        } else if (stopped) {
+          text = `■ stopped after ${dur}`;
+          outcome = "stopped";
+        } else if (exitCode === 0) {
+          text = `✓ done in ${dur}`;
+          outcome = "success";
+        } else {
+          text = `✗ exited with code ${exitCode ?? "unknown"} after ${dur}`;
+          outcome = "error";
+        }
+        return {
           ...current,
           running: false,
           stopped,
           exitCode,
           endedAt: Date.now(),
           lines: [...current.lines, { stream: "exit", text, outcome }],
-        },
-      };
-      applyBoardOutcome(commandId, { stopped, exitCode, errorText });
+        };
+      });
+      if (applied) applyBoardOutcome(path, commandId, { stopped, exitCode, errorText });
     }
 
     try {
-      await runCommand(repoPath, commandId, values, runId, (event: RunEvent) => {
+      await runCommand(path, commandId, values, runId, (event: RunEvent) => {
         switch (event.kind) {
           case "line":
             appendLine({ stream: event.stream, text: event.text });
             break;
-          case "step": {
-            const current = runs[commandId];
-            if (!current || current.runId !== runId) break;
-            const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
-            updateRecord({ step, stepHistory: [...current.stepHistory, step] });
+          case "step":
+            patchRun((current) => {
+              const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
+              return { ...current, step, stepHistory: [...current.stepHistory, step] };
+            });
             break;
-          }
           case "progress":
             updateRecord({ progress: { pct: event.pct, text: event.text } });
             break;
@@ -382,7 +537,9 @@
   }
 
   function handleValuesChange(commandId: string, values: Record<string, string>) {
-    paramValues = { ...paramValues, [commandId]: values };
+    if (!repoPath) return;
+    const forRepo = paramValuesByRepo[repoPath] ?? {};
+    paramValuesByRepo = { ...paramValuesByRepo, [repoPath]: { ...forRepo, [commandId]: values } };
   }
 
   function openSettings() {
@@ -401,6 +558,18 @@
     if (saved === "light" || saved === "dark" || saved === "system") {
       theme = saved;
     }
+    rackCollapsed = localStorage.getItem("pult-desktop:rack-collapsed") === "1";
+
+    // Restore the rack (design 4a): the mounted-device list, then the
+    // last-active device straight onto the board. In mock mode the store
+    // starts empty and the `?mockstate` flows below drive mounting
+    // themselves, so this resolves to a no-op there — the guards also keep
+    // a slow store read from clobbering anything such a flow already did.
+    void (async () => {
+      const rack = await loadRack();
+      if (devices.length === 0) devices = rack.devices;
+      if (rack.activePath && !repoPath) await loadRepo(rack.activePath);
+    })();
 
     // Mock-only screenshot helpers: `?theme=dark` forces a theme, and
     // `?mockstate=modal|trusted` drives the app straight to a given state
@@ -427,7 +596,7 @@
       if (forcedTooltip) forceTooltipId = forcedTooltip;
       if (mockState === "modal" || mockState === "trusted" || mockState === "untrusted") {
         void (async () => {
-          await handleOpenRepo();
+          await handleMountDevice();
           if (mockState === "trusted") {
             await handleTrust();
             if (forcedSelect) selectCommand(forcedSelect);
@@ -469,18 +638,32 @@
     {theme}
     breadcrumb={view === "run" ? selectedBreadcrumb : null}
     onBack={view === "run" ? backToBoard : null}
-    onOpenRepo={handleOpenRepo}
     onSearch={(v) => (search = v)}
     onToggleTheme={cycleTheme}
     onOpenSettings={openSettings}
   />
 
   <div class="body">
+    <Rack
+      {devices}
+      activePath={repoPath}
+      {runningPaths}
+      collapsed={rackCollapsed}
+      onSelect={handleSelectDevice}
+      onMountDevice={handleMountDevice}
+      onEject={handleEjectDevice}
+      onToggleCollapsed={toggleRackCollapsed}
+    />
     {#if !listing}
       <div class="fill">
         <EmptyState
-          message={listingError ?? "Open a repository to see its commands."}
-          onOpenRepo={handleOpenRepo}
+          message={listingError ??
+            (repoPath
+              ? "Powering up…"
+              : devices.length
+                ? "Select a device from the rack."
+                : "Mount a repository to see its instruments.")}
+          onMountDevice={handleMountDevice}
         />
       </div>
     {:else if view === "run" && selectedCommand}
