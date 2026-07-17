@@ -84,6 +84,52 @@ export type RunEvent =
   | { kind: "status"; run_id: string; text: string }
   | { kind: "exit"; run_id: string; code: number | null; stopped: boolean };
 
+export interface OutputLine {
+  stream: "stdout" | "stderr" | "exit";
+  text: string;
+  /** Only set on the `exit` stream's line — which of the three summary forms
+   *  it is (see `formatDuration`'s callers in +page.svelte), so renderers
+   *  can color it without re-parsing `text`. */
+  outcome?: "success" | "error" | "stopped";
+}
+
+/** One `step` event, timestamped at arrival — the timestamp isn't part of
+ *  the wire protocol (`RunEvent`'s `step` variant above), it's stamped
+ *  locally the moment +page.svelte's event handler sees it, purely so the
+ *  stage ladder can show a cheap "how long did that stage take" without the
+ *  backend needing to report timing itself. */
+export interface StepEvent {
+  k: number;
+  n: number;
+  name: string;
+  at: number;
+}
+
+// One run record per command id, kept above the board/run-view switch in
+// +page.svelte so a running strip on the board and the run view's output
+// pane both survive navigating back and forth, and so more than one command
+// can run at once (each gets its own run_id — see `RunEvent` above).
+//
+// `step`/`stepHistory`/`progress`/`status` hold the latest (and, for steps,
+// full history of) events of their kind from the PULT_EVENTS channel —
+// additive alongside `lines`. `stopped` distinguishes a user-requested stop
+// from a natural exit once `running` goes false; `startedAt`/`endedAt` are
+// local wall-clock stamps (not from the backend) used for the details page's
+// "started HH:MM:SS" / "elapsed M:SS" / "total M:SS" display.
+export interface RunRecord {
+  runId: string;
+  running: boolean;
+  lines: OutputLine[];
+  step: StepEvent | null;
+  stepHistory: StepEvent[];
+  progress: { pct: number | null; text: string | null } | null;
+  status: string | null;
+  stopped: boolean;
+  exitCode: number | null;
+  startedAt: number;
+  endedAt: number | null;
+}
+
 /** A command's readiness lamp state, derived from doctor + trust.
  *  "no-check" is the confirmed case (doctor answered, `check:` is null) —
  *  distinct from "none", which means "nothing known yet" (doctor hasn't

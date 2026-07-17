@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { MeterState } from "../readiness";
+  import { livenessTiming, blinkTiming } from "../meterLiveness";
+  import { stepToward, prefersReducedMotion, planChase, type ChasePlan } from "../levelSlew";
 
   interface Props {
     state: MeterState;
@@ -11,13 +13,21 @@
      *  any shared clock. Optional only so the component still works if a
      *  caller doesn't have an id handy; every real caller passes one. */
     seed?: string;
+    /** Progress fraction (0..1) for the `running` state only — when set, the
+     *  lit count tracks it directly (round(level*5)) instead of the fixed
+     *  3-lit indeterminate reading, per docs/design-language.md ("While a
+     *  run reports progress, the level is the progress fraction"). Leave
+     *  unset for an indeterminate run (no progress data) — the fixed 3-lit
+     *  (60%) floor plus CommandCard's own sweep strip cover that case. Has
+     *  no effect on any other state. */
+    level?: number;
   }
 
   // Destructured as `propState`, not `state` — Svelte's compiler treats any
   // `$name` where a local binding named `name` exists as a store-subscription
   // read (`$store`), so a local `state` would make the `$state` rune below
   // ambiguous with "subscribe to the store named state" and fail to compile.
-  let { state: propState, size = "sm", staggerDelay = "0ms", seed = "" }: Props = $props();
+  let { state: propState, size = "sm", staggerDelay = "0ms", seed = "", level }: Props = $props();
 
   // Power-on climb, every mount: force the very first frame to render fully
   // dark regardless of what `state` already resolved to, then flip to the
@@ -33,32 +43,123 @@
   // both callers, just invisible on the board where the race usually already
   // produced the same result. Two nested rAFs, not one — a single rAF risks
   // Svelte coalescing both the initial dark render and the flip into one
-  // flush with nothing ever actually painted in between.
+  // flush with nothing ever actually painted in between. `staggerMs` (parsed
+  // from `staggerDelay`, Board.svelte's row-major power-on wave) delays the
+  // flip itself now rather than only a CSS transition-delay (see the old
+  // per-segment stagger this replaced, below) — since the segment *count*
+  // is JS-driven now (see `displayedLitCount`), a card lower on the board
+  // needs its climb to actually start later, not just render its color
+  // fade later.
   let mounted = $state(false);
   onMount(() => {
+    // Read inside the callback, not at the top of the script — staggerDelay
+    // never actually changes for a mounted card, but a top-level read of a
+    // prop only used once here still trips Svelte's "only captures the
+    // initial value" warning; reading it inside onMount is both correct
+    // (only the value at mount time matters) and quiet.
+    const staggerMs = parseFloat(staggerDelay) || 0;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        mounted = true;
+        if (staggerMs > 0) setTimeout(() => (mounted = true), staggerMs);
+        else mounted = true;
       });
     });
   });
   const displayState = $derived(mounted ? propState : ("none" as MeterState));
 
+  // Blink states (docs/design-language.md's "Blink is a mode"): the board's
+  // post-run overlay (readiness.ts's `BoardMeterOverride`) — success, a
+  // failed run (latched until acknowledged), and a user stop — all suspend
+  // the level chase below and the ambient flicker system further down, and
+  // instead alternate the *whole* column between fully dim and fully lit in
+  // the event color (see `.seg.lit-success`/`.seg.lit-run-failed`/
+  // `.seg.lit-stopped` further down). `litCount` is forced to the full 5
+  // for the duration; `displayedLitCount` is left exactly where it was, so
+  // when the blink ends (+page.svelte clears the override — self-timed for
+  // success/stopped, on acknowledgment for run-failed) the level chase
+  // resumes from wherever it already was, which is what makes the recovery
+  // read as "slew from wherever the level was to readiness" rather than a
+  // fresh climb from zero.
+  const BLINK_STATES = new Set<MeterState>(["success", "run-failed", "stopped"]);
+  const isBlinking = $derived(BLINK_STATES.has(displayState));
+
   // Segments lit bottom-up per the design template's meterFor: running (in
-  // progress right now) always wins and shows 3 amber regardless of
-  // readiness; otherwise ready shows 4 green, a failing check shows all 5
-  // red. "no-check" (doctor confirmed there's no `check:` to run) lights
-  // exactly one neutral segment — "powered, no probe" — while "none"
-  // (untrusted, doctor hasn't answered yet, or still mid-climb per
-  // `displayState` above) stays fully dark.
+  // progress right now) always wins and shows 3 amber (the indeterminate
+  // 60% floor) regardless of readiness — UNLESS `level` is set (see the
+  // Props doc comment), in which case the lit count tracks it directly;
+  // otherwise ready shows 4 green, a failing check shows all 5 red. "no-check"
+  // (doctor confirmed there's no `check:` to run) lights exactly one neutral
+  // segment — "powered, no probe" — while "none" (untrusted, doctor hasn't
+  // answered yet, or still mid-climb per `displayState` above) stays fully
+  // dark. `success`/`run-failed`/`stopped` are blink states (see above) —
+  // their LIT_COUNT entries are never actually read for rendering (litCount
+  // forces the full 5 while blinking) but are kept here as the level the
+  // chase target would otherwise reach, and as the value the recovery slew
+  // starts chasing *away from* isn't this — it's wherever the run itself
+  // left `displayedLitCount`, which is the whole point (see `isBlinking`
+  // above).
   const LIT_COUNT: Record<MeterState, number> = {
     running: 3,
     ready: 4,
     failed: 5,
     "no-check": 1,
     none: 0,
+    success: 5,
+    "run-failed": 5,
+    stopped: 3,
   };
-  const litCount = $derived(LIT_COUNT[displayState]);
+  const targetLitCount = $derived(
+    displayState === "running" && level !== undefined
+      ? Math.max(0, Math.min(5, Math.round(level * 5)))
+      : LIT_COUNT[displayState],
+  );
+
+  // The level chase itself (docs/design-language.md's "Levels slew": never
+  // jump, always animate segment-by-segment through every intermediate
+  // value, in both directions, on every transition — mount is just the
+  // special case of chasing from 0). Pure step math lives in levelSlew.ts
+  // (`stepToward`), testable apart from this scheduling glue: each time
+  // `targetLitCount` changes, this effect (re)arms a single `setTimeout`
+  // that nudges `displayedLitCount` one segment closer and, by writing to
+  // it, re-triggers itself — a chain, not a `setInterval`, so a target that
+  // changes mid-chase (e.g. progress ticking while running) redirects from
+  // wherever the chase currently is instead of restarting. `chasePlan`
+  // (levelSlew.ts's `planChase`) holds the current leg's per-step delay
+  // steady across every step of that leg (a bounded-total-duration cadence,
+  // not a flat one — see levelSlew.ts's header comment) and only
+  // recomputes it when `target` itself changes; it's reset to `null`
+  // whenever no chase is in flight (blinking, reduced motion, or already at
+  // target) so the *next* genuine chase always plans fresh from wherever
+  // `displayedLitCount` actually is. Frozen entirely while blinking (see
+  // `isBlinking` above) — a blink isn't a level, it's a mode.
+  // `prefersReducedMotion()` is checked live (not cached) since it's cheap
+  // and can change mid-session; reduced motion snaps straight to target
+  // instead of chasing it, per the design doc.
+  let displayedLitCount = $state(0);
+  let chasePlan: ChasePlan | null = $state(null);
+  $effect(() => {
+    const target = targetLitCount;
+    if (isBlinking) {
+      chasePlan = null;
+      return;
+    }
+    if (prefersReducedMotion()) {
+      if (displayedLitCount !== target) displayedLitCount = target;
+      chasePlan = null;
+      return;
+    }
+    if (displayedLitCount === target) {
+      chasePlan = null;
+      return;
+    }
+    chasePlan = planChase(displayedLitCount, target, chasePlan);
+    const id = setTimeout(() => {
+      displayedLitCount = stepToward(displayedLitCount, target);
+    }, chasePlan.delayMs);
+    return () => clearTimeout(id);
+  });
+
+  const litCount = $derived(isBlinking ? 5 : displayedLitCount);
   const segments = $derived(Array.from({ length: 5 }, (_, i) => i < litCount));
 
   // Tip flicker: the top-most lit segment of running, ready, or failed
@@ -86,8 +187,13 @@
   // different rates read as analog drift; cramming both into one sub-second
   // cycle is what made the glimmer read as a mechanical ~2Hz beat instead.
   // Neither loop ever changes which count of segments reads as lit.
+  // `isBlinking` states are excluded entirely — a blink suspends ALL
+  // ambient liveness (docs/design-language.md: "Blink is a mode"), not just
+  // the run-failed one that used to get a dedicated flash instead; the two
+  // motions (analog shimmer vs. sharp on/off) must never be confusable
+  // (docs/design-language.md: "Flicker is texture; blink is signal").
   const flickerTipIndex = $derived(
-    displayState === "running" || displayState === "ready" || displayState === "failed"
+    !isBlinking && (displayState === "running" || displayState === "ready" || displayState === "failed")
       ? litCount - 1
       : -1,
   );
@@ -101,112 +207,57 @@
   // needed beyond mirroring flickerTipIndex's own -1-when-inapplicable.
   const subTipIndex = $derived(flickerTipIndex >= 0 ? flickerTipIndex - 1 : -1);
 
-  // Deterministic per-card desync: a tiny string hash (no shared PRNG
-  // state, stable across re-renders) picks a period in 0.45-0.8s and a
-  // phase within that period from the command id, so cards never flicker
-  // in lockstep.
-  function seedHash(s: string, salt: number): number {
-    let h = salt >>> 0;
-    for (let i = 0; i < s.length; i++) {
-      h = (Math.imul(h, 31) + s.charCodeAt(i)) >>> 0;
-    }
-    return h;
-  }
-  const FLICKER_MIN_MS = 450;
-  const FLICKER_RANGE_MS = 350; // 0.45s-0.8s period
-  const flickerDuration = $derived(FLICKER_MIN_MS + (seedHash(seed, 0x9e3779b1) % FLICKER_RANGE_MS));
+  // Seeded flicker/level timing (see meterLiveness.ts — shared verbatim with
+  // Tower.svelte, the details page's 28-segment sibling of this component).
+  // flickerDelay's fixed positive floor is what keeps the well's glow ripple
+  // and the tip's own noise (both of which animate a property this
+  // component's mount-climb transitions also use — box-shadow, opacity/
+  // filter) from cutting that climb short; see meterLiveness.ts's own
+  // comment for the fuller rationale, unchanged by this extraction.
+  const timing = $derived(livenessTiming(seed));
+  const flickerDuration = $derived(timing.flickerDuration);
+  const flickerDelay = $derived(timing.flickerDelay);
+  const levelDuration = $derived(timing.levelDuration);
+  const levelDelay = $derived(timing.levelDelay);
+  const levelDelay2 = $derived(timing.levelDelay2);
 
-  // flickerDelay drives the two layers that DO compete with an in-flight
-  // transition on the same property: the well's glow ripple (`lamp-breathe`
-  // below, animates box-shadow — the same property the well's own turn-on
-  // transition uses) and the tip segment's own noise (`lamp-tip-flicker`,
-  // animates opacity/filter on the very segment that may still be mid
-  // background-color climb — see the per-segment climb delay on `.seg`
-  // below). CSS animations always take over a property from a transition
-  // the moment they're active, so starting either of these before the climb
-  // finished painting the tip segment's final frame would visibly cut the
-  // climb short and make the glow/tip pop rather than settle.
-  // FLICKER_SETTLE_MS is a fixed floor comfortably past the slowest climb
-  // this component ever plays (the 200ms base transition plus up to 4
-  // segments' worth of climb stagger for a `failed` well's tip); a small
-  // seeded jitter on top keeps a sliver of the old per-card desync on these
-  // two layers specifically. This mirrors the original design's fixed
-  // (not --meter-delay-relative) settle constant — a heavily board-staggered
-  // card can in principle still out-wait this floor, exactly as it could
-  // before; fixing that is a `--meter-delay`-wide problem out of scope here.
-  // The dip/glimmer overlays below don't share this constraint — see
-  // `levelDelay`.
-  const FLICKER_SETTLE_MS = 320;
-  const FLICKER_SETTLE_JITTER_MS = 150;
-  const flickerDelay = $derived(
-    FLICKER_SETTLE_MS + (seedHash(seed, 0x85ebca77) % FLICKER_SETTLE_JITTER_MS),
-  );
+  // run-failed's blink is the one that latches — see meterLiveness.ts's
+  // `blinkTiming` doc comment for why it alone needs a seeded cadence (the
+  // others are finite, self-clearing, never more than one live at a time).
+  const blinking = $derived(blinkTiming(seed));
 
-  // Level events: a second, much slower seeded cycle (2.8-4.8s) carries
-  // the dip/glimmer "events" — same seedHash scheme, new salts, so this
-  // cycle's period and phase are independent of the fast texture loop
-  // above (no relationship between how fast the LED shimmers and when the
-  // level next sags or overshoots). A sub-second period was the whole
-  // problem with the old single-loop overshoot: two peaks packed into
-  // 0.45-0.8s reads as an obvious ~2Hz beat no matter how the stops are
-  // placed. A period this much longer than the fast loop, with uneven
-  // (non-equidistant) keyframe gaps on top, is what actually reads as
-  // random rather than looped.
-  const LEVEL_MIN_MS = 2800;
-  const LEVEL_RANGE_MS = 2000; // 2.8s-4.8s period
-  const levelDuration = $derived(LEVEL_MIN_MS + (seedHash(seed, 0x27d4eb2f) % LEVEL_RANGE_MS));
-  // Dip delay: shared verbatim by the tip's dip overlay and the sub-tip's
-  // dim overlay (see `.seg.tip-flicker::after` / `.seg.sub-tip::after`
-  // below) — they need to land in the exact same instant for the sag to
-  // read as one column-level event rather than two coincidentally-timed
-  // ones, so there is deliberately only one delay for both.
-  //
-  // Unlike `flickerDelay` above, this (and `levelDelay2` below) never needs
-  // a positive settle floor: both overlays it drives paint on their own
-  // `::after` layer, animating only that layer's opacity — a property
-  // nothing else on the segment ever transitions — so there's no shared-
-  // property fight to wait out (see the `.seg.tip-flicker::after` comment).
-  // A NEGATIVE delay puts the animation already mid-cycle, at its own
-  // seeded phase, the instant the class is applied — mount-climb end, or a
-  // later state change — instead of waiting up to a full `--level-duration`
-  // (2.8s-4.8s) to naturally arrive there. That open-ended wait was the
-  // visible dead time on a freshly mounted details-page meter; this is what
-  // makes flicker activity begin the moment the climb finishes rather than
-  // sitting inert for seconds.
-  const levelDelay = $derived(-(seedHash(seed, 0x165667b1) % levelDuration));
-  // The overshoot glimmer (see `.seg.overshoot` below) rides the same
-  // --level-duration as the dip so they share one slow signal, but gets
-  // its own seeded delay on that duration — peaking in lockstep with the
-  // dip looked like a mechanical seesaw rather than analog overshoot (the
-  // same reason the old fast-loop version used a second delay), so a
-  // second, independently-seeded phase decorrelates the two. Also negative
-  // for the same zero-wait reason as `levelDelay`.
-  const levelDelay2 = $derived(-(seedHash(seed, 0xd3a2646c) % levelDuration));
-
-  // running and ready are the two states with a segment above their tip to
+  // running and ready are the states with a segment above their tip to
   // glimmer into (failed's tip is already the top of the 5-segment well —
   // see the LIT_COUNT/flickerTipIndex comments above, and it keeps dips
   // only, no invented 6th level). Bottom-up indexing means that segment is
-  // exactly `litCount`.
+  // exactly `litCount`. `litCount < 5` guards a `running` meter driven all
+  // the way to full via `level` — no segment left above it to glimmer into
+  // either, same as failed. `stopped` used to be in this list (a partial
+  // amber overshoot) but is a blink state now (see `isBlinking` above) —
+  // ambient-excluded the same way `flickerTipIndex` is.
   const overshootIndex = $derived(
-    displayState === "running" || displayState === "ready" ? litCount : -1,
+    !isBlinking && (displayState === "running" || displayState === "ready") && litCount < 5
+      ? litCount
+      : -1,
   );
 </script>
 
 <div
   class="well {size} glow-{displayState}"
-  style="--meter-delay: {staggerDelay}; --flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms"
+  style="--flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms; --blink-duration: {blinking.blinkDuration}ms; --blink-delay: {blinking.blinkDelay}ms"
   aria-hidden="true"
 >
   <div class="segments">
     {#each segments as lit, i (i)}
       <span
         class="seg"
-        style="--seg-index: {i}"
         class:lit-running={lit && displayState === "running"}
         class:lit-ready={lit && displayState === "ready"}
         class:lit-failed={lit && displayState === "failed"}
         class:lit-no-check={lit && displayState === "no-check"}
+        class:lit-success={lit && displayState === "success"}
+        class:lit-run-failed={lit && displayState === "run-failed"}
+        class:lit-stopped={lit && displayState === "stopped"}
         class:tip-flicker={i === flickerTipIndex}
         class:sub-tip={i === subTipIndex}
         class:overshoot={i === overshootIndex}
@@ -239,7 +290,6 @@
       inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
       0 0 11px -1px var(--glow, transparent);
     transition: box-shadow 200ms ease;
-    transition-delay: var(--meter-delay, 0ms);
   }
 
   .well.lg {
@@ -275,12 +325,86 @@
      loop over the same property (see the `flickerDelay` comment in the
      script block). prefers-reduced-motion already collapses all
      animation-duration to ~0 globally (see global.css), so this is inert
-     there without any extra guard. */
+     there without any extra guard. success/run-failed/stopped are
+     deliberately absent from this list — they're blink states (see below),
+     which suspend this ambient breathing entirely rather than layering on
+     top of it (docs/design-language.md: "Blink is a mode"). */
   .well.glow-running,
   .well.glow-ready,
   .well.glow-failed {
     animation: lamp-breathe var(--flicker-duration, 600ms) steps(1, end) infinite;
     animation-delay: var(--flicker-delay, 0ms);
+  }
+
+  /* Blink mode (docs/design-language.md's "Blink is a mode: flicker OFF,
+     full column fully-dim <-> fully-lit"): success, a failed run, and a
+     user stop each swing the well's halo the full way from lit to
+     essentially off, sharply (steps, no easing, ~2.5Hz — `--blink-duration`
+     defaults to meterLiveness.ts's BLINK_PERIOD_MS), never blended with the
+     ambient breathing above. What differs between the three is only how
+     many times it blinks before the override clears (see +page.svelte's
+     `SUCCESS_PULSE_MS`/`STOP_FLASH_MS`, computed from the same
+     SUCCESS_BLINK_COUNT/STOPPED_BLINK_COUNT this animation-iteration-count
+     must stay in sync with) and the color:
+       - success: a few short green blinks, self-clears.
+       - stopped: briefer still, amber — pre-acknowledged, must never read
+         as an alarm (docs/design-language.md: "A user stop is
+         pre-acknowledged").
+       - run-failed: the only one that never stops on its own — the latch,
+         red, `infinite`, seeded per card (meterLiveness.ts's
+         `blinkTiming`) so multiple failed cards don't blink in lockstep.
+
+     Reduced motion: prefers-reduced-motion collapses every animation-
+     duration to ~0.001ms globally (see global.css) — for a steps(1,end)
+     animation that means it always samples effectively at time-in-cycle ≈
+     0, i.e. permanently the 0%/100% keyframe. The keyframe below is
+     written with that in mind: 0%/100% is the "on" (fully lit) frame, so
+     reduced motion degrades every blink to a *steady solid* well in the
+     event color rather than a frozen-mid-blink or blank one — for
+     run-failed specifically, chosen over trying to preserve any
+     alternation (there's no non-motion way to signal "unacknowledged"
+     continuously) because the latch clears on the user's very first
+     interaction with the command anyway (open its details page, or start a
+     new run — see readiness.ts's `BoardMeterOverride` doc comment), so a
+     steady-red well until that first click is an acceptable tradeoff, not
+     a lost signal; for success/stopped, the JS-timed override clear (not
+     this animation) still ends the steady color after the same real-world
+     duration a sighted user's blink sequence would have taken. */
+  /* Fixed, unseeded 400ms period (meterLiveness.ts's BLINK_PERIOD_MS) —
+     there's only ever one success/stopped overlay live at a time, so unlike
+     run-failed's latch there's no lockstep-across-cards risk to break up
+     with a seed. `--blink-duration`/`--blink-delay` (set from
+     meterLiveness.ts's `blinkTiming`) are reserved for run-failed alone. */
+  .well.glow-success {
+    --glow: color-mix(in srgb, var(--lamp-green) 75%, transparent);
+    animation: lamp-blink-well 400ms steps(1, end) 3;
+  }
+
+  .well.glow-stopped {
+    --glow: color-mix(in srgb, var(--accent) 75%, transparent);
+    animation: lamp-blink-well 400ms steps(1, end) 2;
+  }
+
+  .well.glow-run-failed {
+    --glow: color-mix(in srgb, var(--lamp-red) 75%, transparent);
+    animation: lamp-blink-well var(--blink-duration, 600ms) steps(1, end) infinite;
+    animation-delay: var(--blink-delay, 0ms);
+  }
+
+  @keyframes lamp-blink-well {
+    0%,
+    45%,
+    100% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 16px 2px var(--glow, transparent);
+    }
+    50%,
+    95% {
+      box-shadow:
+        inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
+        0 0 3px 0px transparent;
+    }
   }
 
   @keyframes lamp-breathe {
@@ -347,18 +471,18 @@
     flex: 1;
     border-radius: 1.5px;
     background: var(--seg-off);
+    /* No per-segment transition-delay stagger anymore — the "climb" is now
+       a real JS-driven chase (see the script block's `displayedLitCount`/
+       levelSlew.ts's `stepToward`) that changes which segments are lit one
+       at a time, `chasePlan.delayMs` apart (levelSlew.ts's `planChase`/
+       `slewStepDelay` — 25ms for a short slew, shrinking toward ~12.5ms for
+       a long one, never more than a bounded total sweep duration), so each
+       segment's own class change already lands staggered; this transition
+       only needs to smooth *that* segment's own color change once it
+       happens. A per-index CSS delay on top would double-count the stagger
+       and scramble the visual order on a downward slew (see levelSlew.ts's
+       header comment for why that was rejected). */
     transition: background-color 200ms ease;
-    /* Per-segment climb: `--seg-index` (set inline per span, bottom-up —
-       see `segments` above) adds a small stagger on top of the card-level
-       `--meter-delay`, so a column with several segments changing at once
-       (a fresh power-on, or e.g. running's 3-amber swapping to ready's
-       4-green) visibly lights bottom-up instead of all segments cross-
-       fading in lockstep — the same "climb" the board's card-by-card
-       stagger produces, one level down. 25ms/segment keeps a 5-segment
-       `failed` well's total climb (200ms + 4*25ms = 300ms) short enough to
-       read as instant, not sluggish; `flickerDelay`'s floor above accounts
-       for this worst case explicitly. */
-    transition-delay: calc(var(--meter-delay, 0ms) + var(--seg-index, 0) * 25ms);
   }
 
   .well.lg .seg {
@@ -375,6 +499,50 @@
 
   .seg.lit-failed {
     background: var(--lamp-red);
+  }
+
+  /* Blink states (docs/design-language.md's "Blink is a mode"): every
+     segment is "lit" here (see the script block's `litCount` — forced to
+     the full 5 while `isBlinking`), and every one of them blinks together,
+     sharply, between its color and fully dim (`--seg-off` — the same
+     resting color a genuinely unlit segment shows, not just a dimmed tint,
+     so the "dark" phase reads as "off," not "dim green"). One shared
+     keyframe (`lamp-blink-seg`) driven off `--tint` so success/stopped/
+     run-failed only differ in color and animation-iteration-count/
+     duration, matching `.well.glow-success`/`.well.glow-stopped`/
+     `.well.glow-run-failed` above exactly — see that comment for the
+     iteration-count rationale and the reduced-motion degradation (written
+     the same way here: 0%/100% = "on", so it collapses to steady solid
+     color, in lockstep with the well's own glow). */
+  .seg.lit-success {
+    --tint: var(--lamp-green);
+    background: var(--tint);
+    animation: lamp-blink-seg 400ms steps(1, end) 3;
+  }
+
+  .seg.lit-stopped {
+    --tint: var(--accent);
+    background: var(--tint);
+    animation: lamp-blink-seg 400ms steps(1, end) 2;
+  }
+
+  .seg.lit-run-failed {
+    --tint: var(--lamp-red);
+    background: var(--tint);
+    animation: lamp-blink-seg var(--blink-duration, 600ms) steps(1, end) infinite;
+    animation-delay: var(--blink-delay, 0ms);
+  }
+
+  @keyframes lamp-blink-seg {
+    0%,
+    45%,
+    100% {
+      background-color: var(--tint);
+    }
+    50%,
+    95% {
+      background-color: var(--seg-off);
+    }
   }
 
   /* Neutral "powered, no probe" segment — a gray chosen to clearly read as

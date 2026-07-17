@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import type { CommandInfo, Readiness } from "../types";
-  import { meterStateFor } from "../readiness";
+  import { boardMeterFor, type BoardMeterOverride } from "../readiness";
   import Meter from "./Meter.svelte";
 
   interface Props {
@@ -10,6 +10,14 @@
     running: boolean;
     staggerDelay: string;
     onSelect: () => void;
+    /** Progress fraction (0..1) while `running` — passed straight to
+     *  Meter's `level` prop. `undefined` means an indeterminate run (no
+     *  progress data), which keeps the fixed 3-lit/60% floor and this
+     *  card's own sweep strip below. */
+    level?: number;
+    /** The board's post-run transient/latch overlay for this command, or
+     *  `null` — see readiness.ts's `BoardMeterOverride`. */
+    override?: BoardMeterOverride | null;
     /** Mock-screenshot hook only — see Board.svelte's forceTooltipId. */
     forceTooltip?: boolean;
   }
@@ -20,10 +28,18 @@
   // "subscribe to the local `state` store" instead), silently downgrading
   // every `$state` field below to a plain non-reactive `let` (compiler
   // warning: `non_reactive_update` / `store_rune_conflict`).
-  let { command, state: readiness, running, staggerDelay, onSelect, forceTooltip = false }: Props =
-    $props();
+  let {
+    command,
+    state: readiness,
+    running,
+    staggerDelay,
+    onSelect,
+    level = undefined,
+    override = null,
+    forceTooltip = false,
+  }: Props = $props();
 
-  const meterState = $derived(meterStateFor(readiness, running));
+  const meterState = $derived(boardMeterFor(readiness, running, override));
 
   const paramMarker = $derived.by(() => {
     if (command.interactive) return "terminal-only";
@@ -134,7 +150,7 @@
   onblur={onCardBlur}
   aria-describedby={tooltipOpen ? tooltipId : undefined}
 >
-  <Meter state={meterState} {staggerDelay} seed={command.id} />
+  <Meter state={meterState} {staggerDelay} seed={command.id} {level} />
 
   <div class="content">
     <span class="title">{command.title}</span>
@@ -153,17 +169,20 @@
     <div class="footer mono">
       <span class="id">{command.id}</span>
       {#if running}
-        <span class="marker running-marker">Running…</span>
+        <span class="marker running-marker"
+          >{level !== undefined ? `Running… ${Math.round(level * 100)}%` : "Running…"}</span
+        >
       {:else if paramMarker}
         <span class="marker">{paramMarker}</span>
       {/if}
     </div>
   </div>
 
-  {#if running}
-    <!-- The PULT_EVENTS step ladder (progress/status/step events) will
-         replace this indeterminate strip with a determinate one once the
-         desktop app claims that channel — see README's "Next steps". -->
+  {#if running && level === undefined}
+    <!-- Indeterminate only (no progress data) — a determinate run instead
+         shows its progress via the meter's own climbing level (see
+         docs/design-language.md's state table), so this sweep would be a
+         second gauge for the same number. -->
     <div class="running-strip" aria-hidden="true"></div>
   {/if}
 </button>

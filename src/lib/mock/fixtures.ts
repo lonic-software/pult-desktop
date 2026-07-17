@@ -110,7 +110,7 @@ export const mockListingUntrusted: Listing = {
       origin: AWS_ORIGIN,
       category: "Deploy",
       description:
-        "Builds, pushes, and releases the stack to the chosen region. Safe to re-run — steps report progress as they complete.",
+        "Builds, pushes, and releases the stack to the chosen region. Safe to re-run — steps report progress as they complete. Declares more steps than the mock script emits events for (see mock/backend.ts's aws:deploy script) on purpose — deriveStages marks every step 'done' on a successful exit regardless of whether its own event arrived (see stages.ts), and the extra steps exercise the STAGES screen's horizontal scroll at a realistic-ish count.",
       params: [
         { name: "region", kind: "pick", options: ["eu-west-1", "us-east-1"] },
         {
@@ -122,7 +122,7 @@ export const mockListingUntrusted: Listing = {
       ],
       check: null,
       interactive: false,
-      steps: ["build", "push", "release"],
+      steps: ["build", "push", "release", "migrate", "smoke", "canary", "promote"],
     },
     {
       id: "test:smoke",
@@ -144,6 +144,36 @@ export const mockListingUntrusted: Listing = {
         "Loads the harness's canned fixture data into the target environment — separate from (and not to be confused with) the AWS stack deploy above, hence its own Deploy sub-group under Test Harness rather than merging with it.",
       params: [],
       check: "command -v pytest",
+      interactive: false,
+      steps: null,
+    },
+    {
+      id: "configure",
+      title: "Configure",
+      origin: null,
+      category: "Deploy",
+      description:
+        "Tunes the environment's full parameter set in one pass — most operators only ever touch the first few; everything else is fine at its default. Exercises the parameters module's fold (17 params, 3 required) at the board-app's largest realistic count.",
+      params: [
+        { name: "target", kind: "input", default: null },
+        { name: "version", kind: "input", default: null },
+        { name: "environment", kind: "pick", options: ["dev", "staging", "prod"], default: null },
+        { name: "region", kind: "input", default: "eu-west-1" },
+        { name: "replicas", kind: "input", default: "3" },
+        { name: "timeout", kind: "input", default: "30s" },
+        { name: "retries", kind: "input", default: "2" },
+        { name: "log_level", kind: "pick", options: ["debug", "info", "warn", "error"], default: "info" },
+        { name: "dry_run", kind: "input", default: "false" },
+        { name: "cache", kind: "input", default: "true" },
+        { name: "batch_size", kind: "input", default: "100" },
+        { name: "concurrency", kind: "input", default: "4" },
+        { name: "notify", kind: "input", default: "slack" },
+        { name: "tag", kind: "input", default: "latest" },
+        { name: "profile", kind: "input", default: "default" },
+        { name: "token", kind: "input", default: "", secret: true },
+        { name: "extra_notes", kind: "input", default: "" },
+      ],
+      check: "command -v sh",
       interactive: false,
       steps: null,
     },
@@ -185,5 +215,6 @@ export const mockDoctorReport: DoctorReport = {
       ready: true,
       exit_code: 0,
     },
+    { id: "configure", title: "Configure", check: "command -v sh", ready: true, exit_code: 0 },
   ],
 };

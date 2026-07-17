@@ -9,42 +9,20 @@
     pultVersion,
     runCommand,
     setPultPath,
+    stopRun,
     trustRepo,
   } from "$lib/api";
-  import type { CommandInfo, DoctorReport, Listing, RunEvent } from "$lib/types";
-  import { groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
+  import type { CommandInfo, DoctorReport, Listing, OutputLine, RunEvent, RunRecord } from "$lib/types";
+  import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
+  import { formatDuration } from "$lib/time";
+  import type { BoardMeterOverride } from "$lib/readiness";
+  import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Board from "$lib/components/Board.svelte";
   import RunView from "$lib/components/RunView.svelte";
   import TrustModal from "$lib/components/TrustModal.svelte";
   import SettingsModal from "$lib/components/SettingsModal.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
-
-  interface OutputLine {
-    stream: "stdout" | "stderr" | "exit";
-    text: string;
-  }
-
-  // One run record per command id. Kept above the board/run-view switch so
-  // running strips on the board and the run view's output pane both survive
-  // navigating back and forth, and so more than one command can be running
-  // at once (each gets its own run_id — see src/lib/types.ts's RunEvent).
-  //
-  // `step`/`progress`/`status` hold the latest event of their kind from the
-  // PULT_EVENTS channel (see RunEvent), additive alongside `lines` — nothing
-  // here renders them yet, that's the step-ladder UI phase; this just keeps
-  // them from being dropped on the floor in the meantime. `stopped`
-  // distinguishes a user-requested stop from a natural exit once `running`
-  // goes false.
-  interface RunRecord {
-    runId: string;
-    running: boolean;
-    lines: OutputLine[];
-    step: { k: number; n: number; name: string } | null;
-    progress: { pct: number | null; text: string | null } | null;
-    status: string | null;
-    stopped: boolean;
-  }
 
   let repoPath: string | null = $state(null);
   let listing: Listing | null = $state.raw<Listing | null>(null);
@@ -61,6 +39,88 @@
   let search = $state("");
   let theme: "system" | "light" | "dark" = $state("system");
   let runs: Record<string, RunRecord> = $state({});
+  // The board's post-run transient/latch overlay per command id — see
+  // readiness.ts's `BoardMeterOverride` doc comment for the pure state math
+  // this drives; this is the timer/acknowledgment bookkeeping around it,
+  // kept alongside `runs` (same session-scoped, per-repo lifetime — reset on
+  // `loadRepo`, never persisted). `success`/`stopped` self-clear via
+  // `boardOverrideTimers` below, once each has finished its own blink
+  // sequence (docs/design-language.md's "Blink is a mode" — see
+  // Meter.svelte's `isBlinking`); `run-failed` only clears on acknowledgment
+  // (see the `$effect` near the bottom of this block). The two durations
+  // below are each an iteration-count × meterLiveness.ts's BLINK_PERIOD_MS,
+  // so they exactly cover Meter.svelte's `.well.glow-success`/
+  // `.well.glow-stopped` animation-iteration-count — a mismatch here would
+  // either clip the last blink or leave a stretch of steady color sitting
+  // after the CSS animation already finished.
+  let boardOverrides: Record<string, BoardMeterOverride | null> = $state({});
+  const boardOverrideTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const SUCCESS_PULSE_MS = SUCCESS_BLINK_COUNT * BLINK_PERIOD_MS;
+  const STOP_FLASH_MS = STOPPED_BLINK_COUNT * BLINK_PERIOD_MS;
+
+  function setBoardOverride(commandId: string, override: BoardMeterOverride | null) {
+    boardOverrides = { ...boardOverrides, [commandId]: override };
+  }
+
+  function scheduleOverrideClear(commandId: string, kind: BoardMeterOverride["kind"], ms: number) {
+    const existing = boardOverrideTimers.get(commandId);
+    if (existing) clearTimeout(existing);
+    const handle = setTimeout(() => {
+      boardOverrideTimers.delete(commandId);
+      // Only clear if it's still the same transient overlay — a newer run
+      // (or a newer overlay from this same run finishing again, though that
+      // can't actually happen) must never be clobbered by a stale timer.
+      if (boardOverrides[commandId]?.kind === kind) setBoardOverride(commandId, null);
+    }, ms);
+    boardOverrideTimers.set(commandId, handle);
+  }
+
+  // Applies docs/design-language.md's "Only failures latch" rule once a run
+  // ends: success blinks green a few times then self-clears, a user stop
+  // blinks amber briefly then self-clears, anything else (a real failure, or
+  // an invoke-level error before any exit event) latches red — blinking
+  // until acknowledged (see the `$effect` below for the "being on/opening
+  // the details page" trigger; "starting a new run" is handled directly in
+  // `handleRun`).
+  function applyBoardOutcome(
+    commandId: string,
+    outcome: { stopped: boolean; exitCode: number | null; errorText: string | null },
+  ) {
+    if (outcome.stopped) {
+      setBoardOverride(commandId, { kind: "stopped" });
+      scheduleOverrideClear(commandId, "stopped", STOP_FLASH_MS);
+    } else if (outcome.errorText === null && outcome.exitCode === 0) {
+      setBoardOverride(commandId, { kind: "success" });
+      scheduleOverrideClear(commandId, "success", SUCCESS_PULSE_MS);
+    } else {
+      setBoardOverride(commandId, { kind: "run-failed" });
+    }
+  }
+
+  // Acknowledgment trigger 1 and 2 of 3 (see docs/design-language.md):
+  // opening this command's details page, or already being on it the moment
+  // it fails. Both are exactly "the selected command's override is
+  // run-failed while the run view is showing it" — re-running this effect
+  // on either `selectedId`/`view` changing (navigation) or `boardOverrides`
+  // changing (a live failure while already on the page) covers both without
+  // separate code paths. Trigger 3 (starting a new run) is handled directly
+  // in `handleRun`, since that's a state change this effect doesn't
+  // otherwise observe as an "acknowledgment".
+  $effect(() => {
+    if (view === "run" && selectedId && boardOverrides[selectedId]?.kind === "run-failed") {
+      setBoardOverride(selectedId, null);
+    }
+  });
+
+  // Param form values, keyed by command id — lifted up here (rather than
+  // living in RunView's own local state) so they survive navigating back to
+  // the board and re-opening the same command, same as `runs` above. This
+  // map is in-session working state only (reset on `loadRepo`); RunView
+  // hydrates it from per-repo disk persistence (loadParamValues) on open and
+  // writes non-secret edits back (saveParamValue), which is what the
+  // parameters module's "remembered per repo" footer note promises — see
+  // RunView.
+  let paramValues: Record<string, Record<string, string>> = $state({});
   // `?tooltip=<command-id>` mock-screenshot hook — see Board.svelte's
   // forceTooltipId and CommandCard.svelte's forceTooltip.
   let forceTooltipId: string | null = $state(null);
@@ -98,6 +158,13 @@
 
   const selectedRun = $derived(selectedId ? (runs[selectedId] ?? null) : null);
 
+  // "repo / Source / Category" breadcrumb for the toolbar (design 3a) — only
+  // meaningful once a command is selected; the board itself just shows the
+  // repo name.
+  const selectedBreadcrumb = $derived(
+    selectedCommand && listing ? breadcrumbFor(selectedCommand, listing) : null,
+  );
+
   $effect(() => {
     applyTheme(theme);
   });
@@ -133,6 +200,10 @@
     selectedId = null;
     view = "board";
     runs = {};
+    boardOverrides = {};
+    for (const t of boardOverrideTimers.values()) clearTimeout(t);
+    boardOverrideTimers.clear();
+    paramValues = {};
 
     try {
       const result = await openRepo(path);
@@ -198,6 +269,18 @@
   async function handleRun(commandId: string, values: Record<string, string>) {
     if (!repoPath) return;
     const runId = crypto.randomUUID();
+    // Acknowledgment trigger 3 of 3 (see docs/design-language.md): starting
+    // a new run clears any latched/transient overlay left over from the
+    // previous one outright, rather than leaving it to `boardMeterFor`
+    // (readiness.ts) to merely out-prioritize while running — that function
+    // treats `running` as always winning, but the overlay would still be
+    // sitting there ready to reappear if this run somehow ended without
+    // setting a new one (it can't, `finish` below always does, but clearing
+    // here is the actual acknowledgment moment, not a rendering detail).
+    const existingTimer = boardOverrideTimers.get(commandId);
+    if (existingTimer) clearTimeout(existingTimer);
+    boardOverrideTimers.delete(commandId);
+    setBoardOverride(commandId, null);
     runs = {
       ...runs,
       [commandId]: {
@@ -205,9 +288,13 @@
         running: true,
         lines: [],
         step: null,
+        stepHistory: [],
         progress: null,
         status: null,
         stopped: false,
+        exitCode: null,
+        startedAt: Date.now(),
+        endedAt: null,
       },
     };
 
@@ -217,19 +304,48 @@
       runs = { ...runs, [commandId]: { ...current, lines: [...current.lines, line] } };
     }
 
-    function updateRecord(patch: Partial<Pick<RunRecord, "step" | "progress" | "status">>) {
+    function updateRecord(patch: Partial<Pick<RunRecord, "step" | "stepHistory" | "progress" | "status">>) {
       const current = runs[commandId];
       if (!current || current.runId !== runId) return;
       runs = { ...runs, [commandId]: { ...current, ...patch } };
     }
 
-    function finish(line: OutputLine, stopped: boolean) {
+    // Terminal states share one summary-line shape (the output module's
+    // final "✓ done in M:SS" / "✗ exited with code N after M:SS" / "■
+    // stopped after M:SS" line — see RunView/OutputPane) so both a clean
+    // exit and an invoke-level failure (network hiccup, backend error —
+    // never a normal process exit) go through the same bookkeeping.
+    function finish(exitCode: number | null, stopped: boolean, errorText: string | null) {
       const current = runs[commandId];
       if (!current || current.runId !== runId) return;
+      const dur = formatDuration(Date.now() - current.startedAt);
+      let text: string;
+      let outcome: "success" | "error" | "stopped";
+      if (errorText !== null) {
+        text = errorText;
+        outcome = "error";
+      } else if (stopped) {
+        text = `■ stopped after ${dur}`;
+        outcome = "stopped";
+      } else if (exitCode === 0) {
+        text = `✓ done in ${dur}`;
+        outcome = "success";
+      } else {
+        text = `✗ exited with code ${exitCode ?? "unknown"} after ${dur}`;
+        outcome = "error";
+      }
       runs = {
         ...runs,
-        [commandId]: { ...current, running: false, stopped, lines: [...current.lines, line] },
+        [commandId]: {
+          ...current,
+          running: false,
+          stopped,
+          exitCode,
+          endedAt: Date.now(),
+          lines: [...current.lines, { stream: "exit", text, outcome }],
+        },
       };
+      applyBoardOutcome(commandId, { stopped, exitCode, errorText });
     }
 
     try {
@@ -238,9 +354,13 @@
           case "line":
             appendLine({ stream: event.stream, text: event.text });
             break;
-          case "step":
-            updateRecord({ step: { k: event.k, n: event.n, name: event.name } });
+          case "step": {
+            const current = runs[commandId];
+            if (!current || current.runId !== runId) break;
+            const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
+            updateRecord({ step, stepHistory: [...current.stepHistory, step] });
             break;
+          }
           case "progress":
             updateRecord({ progress: { pct: event.pct, text: event.text } });
             break;
@@ -248,13 +368,21 @@
             updateRecord({ status: event.text });
             break;
           case "exit":
-            finish({ stream: "exit", text: `Exit code: ${event.code ?? "unknown"}` }, event.stopped);
+            finish(event.code, event.stopped, null);
             break;
         }
       });
     } catch (e) {
-      finish({ stream: "exit", text: String(e) }, false);
+      finish(null, false, String(e));
     }
+  }
+
+  function handleStop(runId: string) {
+    void stopRun(runId);
+  }
+
+  function handleValuesChange(commandId: string, values: Record<string, string>) {
+    paramValues = { ...paramValues, [commandId]: values };
   }
 
   function openSettings() {
@@ -290,6 +418,12 @@
       const forcedSearch = params.get("search");
       const forcedRun = params.get("run");
       const forcedTooltip = params.get("tooltip");
+      // `?stopAfter=<ms>` — only meaningful alongside `?run=`: schedules an
+      // automatic Stop click `ms` after the run starts, purely so the stop
+      // flow (brief amber, no latch — see docs/design-language.md) can be
+      // screenshotted from a one-shot headless render instead of needing
+      // real interactive clicking.
+      const stopAfter = params.get("stopAfter");
       if (forcedTooltip) forceTooltipId = forcedTooltip;
       if (mockState === "modal" || mockState === "trusted" || mockState === "untrusted") {
         void (async () => {
@@ -303,6 +437,15 @@
             // mid-run (running strip + amber meter) — see "Mock mode" in
             // the README.
             if (forcedRun) void handleRun(forcedRun, {});
+            if (forcedRun && stopAfter) {
+              const ms = Number(stopAfter);
+              if (Number.isFinite(ms)) {
+                setTimeout(() => {
+                  const active = runs[forcedRun];
+                  if (active?.running) handleStop(active.runId);
+                }, ms);
+              }
+            }
           } else if (mockState === "untrusted") {
             // Dismiss the trust modal (as if the user clicked "Not now")
             // to land on the read-only board itself, all dark — the modal
@@ -324,6 +467,8 @@
     repoName={listing?.name ?? null}
     {search}
     {theme}
+    breadcrumb={view === "run" ? selectedBreadcrumb : null}
+    onBack={view === "run" ? backToBoard : null}
     onOpenRepo={handleOpenRepo}
     onSearch={(v) => (search = v)}
     onToggleTheme={cycleTheme}
@@ -345,9 +490,11 @@
           path={repoPath ?? ""}
           trusted={listing.trusted}
           {doctorReport}
-          running={selectedRun?.running ?? false}
-          outputLines={selectedRun?.lines ?? []}
+          run={selectedRun}
+          initialValues={paramValues[selectedCommand.id] ?? null}
           onRun={(values) => handleRun(selectedCommand.id, values)}
+          onStop={() => selectedRun && handleStop(selectedRun.runId)}
+          onValuesChange={(values) => handleValuesChange(selectedCommand.id, values)}
           onBack={backToBoard}
         />
       </main>
@@ -358,6 +505,7 @@
           trusted={listing.trusted}
           {doctorReport}
           {runs}
+          overrides={boardOverrides}
           {search}
           {forceTooltipId}
           onSelect={selectCommand}

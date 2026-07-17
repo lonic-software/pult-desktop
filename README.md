@@ -157,6 +157,10 @@ without manual clicking (see `onMount` in `src/routes/+page.svelte`):
   mock timers (see `handleRun` in `src/routes/+page.svelte`)
 - `?tooltip=<command-id>` — force that card's description tooltip open on
   mount (skipping the real hover delay), for scripting a tooltip screenshot
+- `?stopAfter=<ms>` — only with `?run=`: automatically clicks Stop `ms`
+  after the run starts, so the stop flow (board: brief amber blink, no
+  latch; details page: the same brief blink, then slews back to readiness)
+  can be screenshotted from a one-shot headless render
 - `?theme=light|dark` — force a theme regardless of OS preference
 
 These are inert outside `VITE_MOCK=1`. Used to script the canonical

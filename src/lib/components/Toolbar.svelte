@@ -7,16 +7,43 @@
     onSearch: (value: string) => void;
     onToggleTheme: () => void;
     onOpenSettings: () => void;
+    /** Source / category path for the currently-open command, shown after
+     *  the repo name on the details page (design 3a's "repo / Source /
+     *  Category" breadcrumb — see `breadcrumbFor` in grouping.ts). Absent
+     *  on the board, where the repo name alone is enough context. */
+    breadcrumb?: { source: string; category: string } | null;
+    /** Present only on the details page (+page.svelte passes the same
+     *  `backToBoard` it wires to RunView's Esc handling; the board itself
+     *  passes `null`) — renders a bordered "← Board" button as the
+     *  toolbar's left-most element, before the breadcrumb. `null` rather
+     *  than always-present-but-sometimes-a-no-op so the board never renders
+     *  a control with nothing to go back to. */
+    onBack?: (() => void) | null;
   }
 
-  let { repoName, search, theme, onOpenRepo, onSearch, onToggleTheme, onOpenSettings }: Props =
-    $props();
+  let {
+    repoName,
+    search,
+    theme,
+    onOpenRepo,
+    onSearch,
+    onToggleTheme,
+    onOpenSettings,
+    breadcrumb = null,
+    onBack = null,
+  }: Props = $props();
 </script>
 
 <header class="toolbar">
   <div class="drag-region" data-tauri-drag-region></div>
   <div class="content">
-    <span class="repo-name mono">{repoName ?? "No repository open"}</span>
+    {#if onBack}
+      <button type="button" class="back-btn micro" onclick={onBack}>← Board</button>
+    {/if}
+    <span class="repo-name mono"
+      >{repoName ?? "No repository open"}{#if breadcrumb}<span class="crumb-sep">/</span
+        >{breadcrumb.source}<span class="crumb-sep">/</span>{breadcrumb.category}{/if}</span
+    >
     <button type="button" class="micro" onclick={onOpenRepo}>Open repository…</button>
     <input
       class="search micro"
@@ -66,13 +93,27 @@
     padding: 0 var(--space-3) 0 78px;
   }
 
+  /* Chrome is the plain `button` rule below (border/panel-bg/emboss+shadow)
+     — the design reference calls for the same bordered-panel look as every
+     other toolbar button, so this only adds what's specific to sitting
+     left of the breadcrumb: no shrink, no wrap. */
+  .back-btn {
+    flex: none;
+    white-space: nowrap;
+  }
+
   .repo-name {
     font-size: 12px;
     color: var(--muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 220px;
+    max-width: 420px;
+  }
+
+  .crumb-sep {
+    color: var(--line);
+    margin: 0 var(--space-2);
   }
 
   button,

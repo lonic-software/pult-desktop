@@ -18,9 +18,23 @@
      *  same way `pult doctor` is, so we don't even attempt it (and don't show
      *  a resolve error) until the repo is trusted. */
     trusted: boolean;
+    /** Purely cosmetic (renders as the label's " ·opt" suffix — the CRT
+     *  screens' one optionality marker, see the row's `.opt-suffix` style)
+     *  — the caller (RunView) already decides fold-worthiness from
+     *  `param.default` independently; this prop just lets that same
+     *  "has a default" fact show up next to the label without ParamField
+     *  re-deriving it. */
+    optional?: boolean;
   }
 
-  let { param, value, onChange, path, commandId, values, trusted }: Props = $props();
+  let { param, value, onChange, path, commandId, values, trusted, optional = false }: Props = $props();
+
+  // Right-column "kind hint" (design reference's PARAMETERS MODULE row
+  // layout) — honest metadata straight off the param model, never a
+  // separately-maintained label: a secret input is more useful labeled
+  // "secret" than "input" (it's the more specific true fact), otherwise the
+  // hint is just the declared param kind ("pick" or "input").
+  const kindHint = $derived(param.secret ? "secret" : param.kind);
 
   const isPickOptions = $derived(param.kind === "pick" && !!param.options);
   const isPickSource = $derived(param.kind === "pick" && !!param.source && !param.options);
@@ -116,9 +130,12 @@
   });
 </script>
 
-<div class="field">
-  <label class="label mono" for="param-{param.name}">{param.name}</label>
+<div class="row">
+  <label class="label mono" for="param-{param.name}"
+    >{param.name}{#if optional}<span class="opt-suffix"> ·opt</span>{/if}</label
+  >
 
+  <div class="field-col">
   {#if isPickOptions}
     <select id="param-{param.name}" value={value} onchange={(e) => onChange((e.target as HTMLSelectElement).value)}>
       <option value="" disabled selected={value === ""}>Choose…</option>
@@ -175,39 +192,101 @@
       placeholder={param.default ?? ""}
     />
   {/if}
+  </div>
+
+  <span class="hint mono">{kindHint}</span>
 </div>
 
 <style>
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    margin-bottom: var(--space-3);
+  /* CRT phosphor row restyle for the details page's PARAMETERS screen
+     (design reference's PARAMETERS MODULE, variant 3c) — CSS only, no
+     logic/state here changed; every branch above (pick/options, pick/source
+     + its loading/error/depends_on states, secret, plain input) renders
+     exactly as before, just re-skinned. Only one call site (RunView's
+     params list, always inside a `.pult-crt` screen), so this restyles the
+     component's own scoped CSS directly rather than adding a variant prop —
+     see RunView's params-module comment for the shared `.pult-crt`/
+     `.pult-screen` vocabulary these rows live inside. Colors come from the
+     phosphor custom properties `.pult-crt` defines (crt.css) — inherited
+     straight through the DOM regardless of Svelte's per-component scoping —
+     with a literal fallback in case this ever renders outside that
+     ancestor. */
+  .row {
+    display: grid;
+    grid-template-columns: 172px 1fr auto;
+    align-items: start;
+    gap: 14px;
+    padding: 9px 15px;
+    border-bottom: 1px solid var(--crt-divider, rgba(158, 214, 160, 0.08));
   }
 
   .label {
-    font-size: 12px;
-    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--crt-muted, #6d8a72);
+    padding-top: 5px;
+  }
+
+  /* The one optionality marker (see the Props doc comment above: RunView
+     already decides fold-worthiness independently) — a lowercase suffix
+     riding on the label rather than a separate "optional" tag, so a param
+     is never annotated as optional twice. */
+  .opt-suffix {
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+    color: var(--crt-placeholder, #597160);
+  }
+
+  .field-col {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
   }
 
   input,
   select {
-    padding: var(--space-2) var(--space-2);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-control);
-    background: var(--bg);
-    color: var(--ink);
-    font-size: 13px;
-    max-width: 360px;
+    width: 100%;
+    max-width: 260px;
+    padding: 5px 8px;
+    border: 1px solid var(--crt-field-border, #33443a);
+    border-radius: 3px;
+    background: var(--crt-field-bg, rgba(158, 214, 160, 0.05));
+    color: var(--crt-ink, #a9c9ab);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  input::placeholder {
+    color: var(--crt-placeholder, #597160);
+  }
+
+  input:disabled,
+  select:disabled {
+    opacity: 0.55;
   }
 
   .helper {
     margin: 0;
-    font-size: 12px;
-    color: var(--muted);
+    font-size: 10.5px;
+    color: var(--crt-muted, #6d8a72);
   }
 
   .helper-error {
-    color: var(--lamp-red);
+    color: var(--crt-red, #e88a7a);
+  }
+
+  /* Right column: honest kind metadata (see `kindHint` above), not another
+     optionality marker. */
+  .hint {
+    font-size: 10px;
+    color: var(--crt-placeholder, #597160);
+    white-space: nowrap;
+    text-align: right;
+    padding-top: 5px;
   }
 </style>

@@ -1,19 +1,17 @@
 <script lang="ts">
   import type { CommandGroup } from "../grouping";
-  import type { CommandInfo, DoctorReport } from "../types";
-  import { readinessFor } from "../readiness";
+  import type { CommandInfo, DoctorReport, RunRecord } from "../types";
+  import { readinessFor, type BoardMeterOverride } from "../readiness";
   import CommandCard from "./CommandCard.svelte";
-
-  interface RunRecord {
-    runId: string;
-    running: boolean;
-  }
 
   interface Props {
     groups: CommandGroup[];
     trusted: boolean;
     doctorReport: DoctorReport | null;
     runs: Record<string, RunRecord>;
+    /** Post-run transient/latch overlay per command id — see readiness.ts's
+     *  `BoardMeterOverride`; owned and timed centrally in +page.svelte. */
+    overrides: Record<string, BoardMeterOverride | null>;
     search: string;
     onSelect: (id: string) => void;
     /** Mock-screenshot hook only (`?tooltip=<command-id>`, see routes'
@@ -23,8 +21,16 @@
     forceTooltipId?: string | null;
   }
 
-  let { groups, trusted, doctorReport, runs, search, onSelect, forceTooltipId = null }: Props =
+  let { groups, trusted, doctorReport, runs, overrides, search, onSelect, forceTooltipId = null }: Props =
     $props();
+
+  /** A running command's progress fraction (0..1), or `undefined` for an
+   *  indeterminate run (no `progress.pct` data yet) — passed straight
+   *  through to CommandCard/Meter's `level` prop. */
+  function levelFor(id: string): number | undefined {
+    const pct = runs[id]?.progress?.pct;
+    return pct == null ? undefined : Math.max(0, Math.min(100, pct)) / 100;
+  }
 
   // Row-major power-on stagger across the whole board (not per-module) —
   // now staggers the meters' appearance rather than the old round lamp's.
@@ -125,6 +131,8 @@
                         command={cmd}
                         {state}
                         running={runs[cmd.id]?.running ?? false}
+                        level={levelFor(cmd.id)}
+                        override={overrides[cmd.id] ?? null}
                         staggerDelay={staggerDelay(cmd.id)}
                         forceTooltip={forceTooltipId === cmd.id}
                         onSelect={() => onSelect(cmd.id)}
@@ -146,6 +154,8 @@
                   command={cmd}
                   {state}
                   running={runs[cmd.id]?.running ?? false}
+                  level={levelFor(cmd.id)}
+                  override={overrides[cmd.id] ?? null}
                   staggerDelay={staggerDelay(cmd.id)}
                   forceTooltip={forceTooltipId === cmd.id}
                   onSelect={() => onSelect(cmd.id)}

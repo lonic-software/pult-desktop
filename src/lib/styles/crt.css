@@ -1,0 +1,115 @@
+/* CRT phosphor screens — the details page's PARAMETERS / STAGES / OUTPUT
+   surfaces (design variant 3c, "old-school screens"; see
+   docs/design-language.md's "Screens" section for the rationale). Global,
+   unscoped CSS on purpose: these three surfaces are owned by three different
+   Svelte components (RunView renders the params/stages screen markup
+   directly; OutputPane owns its own scrolling root), and Svelte's per-
+   component style scoping has no mechanism to share a class across
+   components without either duplicating the rules in each `<style>` block or
+   reaching for `:global()` at every call site. A small shared stylesheet —
+   the same role tokens.css/global.css already play for cross-component,
+   theme-level rules (scrollbars, focus ring, `.mono`) — is the one place
+   that reaches all three without either.
+
+   HARD REQUIREMENT: the scan lines are FIXED to the bezel, never to
+   scrolled content. `.pult-crt` is the non-scrolling outer wrapper; its
+   `::after` (scan lines + sheen + vignette) is pinned to that box with
+   `position: absolute; inset: 0`. `.pult-screen` — the part that actually
+   scrolls — is a plain, unpositioned CHILD of `.pult-crt`, so it paints
+   *underneath* the (higher, absolutely-positioned) overlay and dragging its
+   content around never moves the overlay's own box. Every caller must keep
+   that nesting: `.pult-crt > .pult-screen`, never the reverse, and never the
+   two merged onto one scrolling element. */
+
+.pult-crt {
+  position: relative;
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--crt-bg);
+  box-shadow:
+    inset 0 1px 5px rgba(0, 0, 0, 0.85),
+    inset 0 0 40px rgba(0, 0, 0, 0.55),
+    inset 0 0 6px rgba(122, 170, 110, 0.12);
+
+  /* Phosphor palette — FIXED regardless of app theme (a physical tube
+     doesn't change with room lighting), so these are literal values, not
+     --bg/--ink/etc. Scoped as custom properties here (rather than inlined
+     at every use) so the whole palette stays a single source of truth, and
+     so descendant components (ParamField, OutputPane — see the file-level
+     comment) can consume it via `var()` across the Svelte scoping boundary:
+     custom-property inheritance follows the DOM tree, not a component's own
+     style scope, so it reaches them for free. Each consumer still carries a
+     literal fallback (`var(--crt-ink, #a9c9ab)`) in case it's ever rendered
+     outside a `.pult-crt` ancestor. */
+  --crt-bg: #10160f;
+  --crt-ink: #a9c9ab;
+  --crt-muted: #6d8a72;
+  --crt-dim: #5f7563;
+  --crt-off: #2c3a2f;
+  --crt-line: rgba(158, 214, 160, 0.16);
+  --crt-divider: rgba(158, 214, 160, 0.08);
+  --crt-green: #7ed492;
+  --crt-red: #e88a7a;
+  --crt-amber: #e0c274;
+  --crt-field-border: #33443a;
+  --crt-field-bg: rgba(158, 214, 160, 0.05);
+  /* The design reference's literal placeholder/hint value (#4e6354) is
+     ~2.8:1 against --crt-bg — too low to hold up as real 10px UI text (the
+     PARAMETERS screen's kind-hint column, the label's " ·opt" suffix, input
+     placeholders). Bumped lightness-only (same hue/saturation) to ~3.5:1 —
+     still the dimmest tier, still clearly below --crt-dim's 3.7:1, just no
+     longer under the line into illegible. See RunView/ParamField for where
+     this lands in the actual render. */
+  --crt-placeholder: #597160;
+  /* Reserved palette entries — part of the approved 3c palette but not
+     consumed by any of the three restyled screens (the header module's
+     last-run line and any toggle control are explicitly out of this
+     restyle's scope, see RunView's file-level comment). Kept here anyway so
+     the palette is complete and the values don't have to be rediscovered if
+     a later surface needs them. */
+  --crt-last-run: #6fa578;
+  --crt-toggle-on: #4f8f5c;
+}
+
+.pult-crt::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+  background:
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.22) 0 1px, transparent 1px 3px),
+    radial-gradient(ellipse 130% 90% at 50% 0%, rgba(196, 255, 200, 0.05), transparent 45%),
+    radial-gradient(ellipse 160% 130% at 50% 55%, transparent 55%, rgba(0, 0, 0, 0.4) 100%);
+}
+
+.pult-crt-glow {
+  text-shadow: 0 0 5px rgba(158, 214, 160, 0.35);
+}
+
+/* The scrolling child. No positioning/overflow-direction rules here — those
+   are per-module (vertical for params/output, horizontal for stages) and
+   live with each module's own layout. This only carries what every screen
+   shares: a phosphor-tinted scrollbar instead of the app-wide one. */
+.pult-screen {
+  color: var(--crt-ink);
+  font-family: var(--font-mono);
+  scrollbar-width: thin;
+  scrollbar-color: #3d4f42 transparent;
+}
+
+.pult-screen::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.pult-screen::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.pult-screen::-webkit-scrollbar-thumb {
+  background: #3d4f42;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}

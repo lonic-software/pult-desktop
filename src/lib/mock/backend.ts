@@ -70,28 +70,115 @@ export async function resolvePickSource(
   return resolver ? resolver(values) : [];
 }
 
-const MOCK_RUN_LOG: Record<string, string[]> = {
-  shell: ["opening a shell in dev…", "done"],
-  status: ["checking status…", "all good"],
-  import: [
-    "└  running: echo importing with token '••••••' note demo",
-    "importing with token hunter2 note demo",
-  ],
-  "aws:whoami": ["arn:aws:sts::123456789012:assumed-role/demo/operator"],
-  "aws:deploy": [
-    "step 1/3 build",
-    "building…",
-    "step 2/3 push",
-    "pushing image…",
-    "step 3/3 release",
-    "releasing eu-west-1…",
-    "done",
-  ],
+// A scripted run's timeline: one action per PULT_EVENTS/output kind (see
+// RunEvent in types.ts), each preceded by its own delay so a script can pace
+// itself — a burst of quick lines here, a slower deliberate pause there — to
+// demo something specific rather than uniformly ticking at one rate the way
+// the old flat MOCK_RUN_LOG did.
+type MockAction =
+  | { delay: number; kind: "line"; stream: "stdout" | "stderr"; text: string }
+  | { delay: number; kind: "step"; k: number; n: number; name: string }
+  | { delay: number; kind: "progress"; pct: number | null; text?: string | null }
+  | { delay: number; kind: "status"; text: string };
+
+interface MockScript {
+  actions: MockAction[];
+  /** `null` exit code = the run "fails" without a normal process exit code,
+   *  same shape `RunEvent`'s `exit.code` allows for a signal-killed process;
+   *  every script here uses either `0` or a small positive int. */
+  exitCode: number;
+}
+
+function line(delayMs: number, text: string, stream: "stdout" | "stderr" = "stdout"): MockAction {
+  return { delay: delayMs, kind: "line", stream, text };
+}
+
+// Demo scripts, one per fixture command that needs to say something
+// specific about the SIGNAL tower/board meter language (see
+// docs/design-language.md and RunView/Tower.svelte):
+//
+//   aws:deploy  — determinate progress + stages, ends in success. Emits
+//                 step/progress events alongside its lines so the tower
+//                 climbs with a "<pct>%" readout, the stage ladder advances
+//                 card by card, and the board meter's level tracks pct too.
+//   status      — indeterminate (no step/progress events at all, ever) —
+//                 the tower reads 60% "RUN"/"ACTIVE", the board meter stays
+//                 the fixed 3-lit floor plus its sweep strip. Paced slower
+//                 than a 2-line command needs so there's time to screenshot
+//                 the running state.
+//   import      — fails (non-zero exit, stderr line) — proves the board's
+//                 blinking red latch and the details page's own few-blinks-
+//                 then-recover "ERR" tower + failed stage-less output.
+//   test:smoke  — a longer, evenly-paced run with nothing time-sensitive in
+//                 it, meant to be interrupted mid-run via Stop — proves the
+//                 stop flow (brief amber blink, no latch) without racing a
+//                 screenshot script against a run that finishes on its own.
+const MOCK_SCRIPTS: Record<string, MockScript> = {
+  shell: { actions: [line(180, "opening a shell in dev…"), line(180, "done")], exitCode: 0 },
+
+  status: {
+    actions: [
+      line(250, "checking status…"),
+      { delay: 400, kind: "status", text: "verifying environment" },
+      line(450, "all good"),
+    ],
+    exitCode: 0,
+  },
+
+  import: {
+    actions: [
+      line(200, "resolving vendor export…"),
+      line(250, "authenticating with token '••••••'"),
+      line(300, "error: token rejected (401 unauthorized)", "stderr"),
+    ],
+    exitCode: 1,
+  },
+
+  "aws:whoami": {
+    actions: [line(220, "arn:aws:sts::123456789012:assumed-role/demo/operator")],
+    exitCode: 0,
+  },
+
+  "aws:deploy": {
+    actions: [
+      { delay: 150, kind: "step", k: 1, n: 3, name: "build" },
+      { delay: 200, kind: "progress", pct: 12 },
+      line(250, "building image…"),
+      { delay: 250, kind: "progress", pct: 33 },
+      { delay: 200, kind: "step", k: 2, n: 3, name: "push" },
+      { delay: 250, kind: "progress", pct: 50 },
+      line(250, "pushing image…"),
+      { delay: 250, kind: "progress", pct: 66 },
+      { delay: 200, kind: "step", k: 3, n: 3, name: "release" },
+      { delay: 250, kind: "progress", pct: 85 },
+      line(250, "releasing eu-west-1…"),
+      { delay: 200, kind: "progress", pct: 100 },
+      line(150, "done"),
+    ],
+    exitCode: 0,
+  },
+
+  "test:smoke": {
+    actions: [
+      line(500, "collecting tests…"),
+      line(500, "running unit suite…"),
+      line(500, "running integration suite…"),
+      line(500, "running contract suite…"),
+      line(500, "running e2e suite…"),
+      line(500, "all suites passed"),
+    ],
+    exitCode: 0,
+  },
+
+  "test:deploy": { actions: [line(180, "loading fixtures…"), line(180, "done")], exitCode: 0 },
 };
 
+const DEFAULT_SCRIPT: MockScript = { actions: [line(180, "running…"), line(180, "done")], exitCode: 0 };
+
 // Run ids `stopRun` has been asked to stop — `runCommand`'s loop below
-// checks this before each emitted line so a mock run can be interrupted the
-// same way a real one can, without any real process behind it to signal.
+// checks this before each emitted action so a mock run can be interrupted
+// the same way a real one can, without any real process behind it to
+// signal.
 const stoppedRuns = new Set<string>();
 
 export async function stopRun(runId: string): Promise<void> {
@@ -106,16 +193,29 @@ export async function runCommand(
   runId: string,
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
-  const lines = MOCK_RUN_LOG[id] ?? ["running…", "done"];
-  for (const text of lines) {
-    await delay(180);
+  const script = MOCK_SCRIPTS[id] ?? DEFAULT_SCRIPT;
+  for (const action of script.actions) {
+    await delay(action.delay);
     if (stoppedRuns.has(runId)) {
       stoppedRuns.delete(runId);
       onEvent({ kind: "exit", run_id: runId, code: null, stopped: true });
       return;
     }
-    onEvent({ kind: "line", run_id: runId, stream: "stdout", text });
+    switch (action.kind) {
+      case "line":
+        onEvent({ kind: "line", run_id: runId, stream: action.stream, text: action.text });
+        break;
+      case "step":
+        onEvent({ kind: "step", run_id: runId, k: action.k, n: action.n, name: action.name });
+        break;
+      case "progress":
+        onEvent({ kind: "progress", run_id: runId, pct: action.pct, text: action.text ?? null });
+        break;
+      case "status":
+        onEvent({ kind: "status", run_id: runId, text: action.text });
+        break;
+    }
   }
   await delay(120);
-  onEvent({ kind: "exit", run_id: runId, code: 0, stopped: false });
+  onEvent({ kind: "exit", run_id: runId, code: script.exitCode, stopped: false });
 }

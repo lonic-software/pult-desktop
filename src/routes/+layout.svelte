@@ -3,6 +3,7 @@
   import "$lib/styles/fonts.css";
   import "$lib/styles/tokens.css";
   import "$lib/styles/global.css";
+  import "$lib/styles/crt.css";
 
   let { children }: { children: Snippet } = $props();
 </script>

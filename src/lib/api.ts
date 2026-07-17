@@ -8,8 +8,11 @@ export * from "./types";
 
 import * as mockBackend from "./mock/backend";
 import * as realBackend from "./real/backend";
+import * as mockParamStore from "./mock/paramStore";
+import * as realParamStore from "./real/paramStore";
 
 const backend = isMock ? mockBackend : realBackend;
+const paramStore = isMock ? mockParamStore : realParamStore;
 
 export const pickFolder = backend.pickFolder;
 export const openRepo = backend.openRepo;
@@ -21,3 +24,9 @@ export const setPultPath = backend.setPultPath;
 export const runCommand = backend.runCommand;
 export const stopRun = backend.stopRun;
 export const resolvePickSource = backend.resolvePickSource;
+
+// Per-repo param-value persistence (see ./real/paramStore.ts and
+// ./mock/paramStore.ts) — the parameters module's "remembered per repo"
+// promise. Never call `saveParamValue` for a `param.secret` field.
+export const loadParamValues = paramStore.loadParamValues;
+export const saveParamValue = paramStore.saveParamValue;

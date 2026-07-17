@@ -163,6 +163,22 @@ function buildSubgroups(commands: CommandInfo[]): CommandSubgroup[] {
   return Array.from(subgroups.values());
 }
 
+/** Source / category breadcrumb for a single command, e.g. for the details
+ *  page's toolbar breadcrumb ("repo / Source / Category"). Reuses the same
+ *  source-label rule as the board's nested grouping (module name, else raw
+ *  origin, else "Local") and the same "General" fallback sub-groups use for
+ *  an uncategorized command — deliberately independent of whether the board
+ *  itself is currently flat or nested, since a single command always has one
+ *  unambiguous source and category regardless of how the board chose to
+ *  display it. */
+export function breadcrumbFor(
+  cmd: CommandInfo,
+  listing: Listing,
+): { source: string; category: string } {
+  const { label: source } = sourceKeyAndLabel(cmd, listing);
+  return { source, category: cmd.category ?? GENERAL_SUBGROUP_LABEL };
+}
+
 export function groupCommands(listing: Listing): GroupedListing {
   const sourceCount = new Set(
     listing.commands.map((cmd) => (cmd.origin === null ? LOCAL_GROUP_KEY : cmd.origin)),
