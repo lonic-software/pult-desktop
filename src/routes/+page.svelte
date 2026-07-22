@@ -29,6 +29,7 @@
   } from "$lib/types";
   import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
   import { reconcileDecision } from "$lib/reconcile";
+  import { shouldAcceptEvent } from "$lib/tailGen";
   import { formatDuration } from "$lib/time";
   import type { BoardMeterOverride } from "$lib/readiness";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
@@ -81,7 +82,15 @@
   // is registered here too, synchronously, before its spawn invoke is even
   // awaited (see `handleRun`), so every run source in the app now routes
   // through this one map by run_id.
-  const activeTails = new Map<string, (event: RunEvent) => void>();
+  //
+  // `gen` (fix round 2's generation-fenced tail restart —
+  // src-tauri/src/journal.rs's `TailRegistry`) is the run_id's *adopted*
+  // generation: `null` until a `tail_start` event sets it (see the shared
+  // subscription below), so a mock-backend run (which never emits
+  // `tail_start`) simply never fences anything. Stored per-entry here rather
+  // than on `RunRecord` — it's routing bookkeeping for the shared
+  // subscription, not part of the record a view renders.
+  const activeTails = new Map<string, { apply: (event: RunEvent) => void; gen: number | null }>();
 
   // Per-device "is a run of mine now visible in the journal that I've never
   // seen before" polling — see `pollRuns` below. Only the currently active
@@ -457,6 +466,23 @@
 
     function applyEvent(event: RunEvent) {
       switch (event.kind) {
+        case "tail_start":
+          // Fix round 2's in-band reset: a fresh tail always starts
+          // replaying from offset 0, so whatever this record already
+          // accumulated from a PREVIOUS generation's tail must be cleared
+          // first — otherwise a restart (eject/remount, the refresh-branch
+          // catch-up) would append the full backlog a second time on top of
+          // itself. Replaces the old manual reset that used to live in
+          // reconcile's refresh branch.
+          patchRun((current) => ({
+            ...current,
+            lines: [],
+            step: null,
+            stepHistory: [],
+            progress: null,
+            status: null,
+          }));
+          break;
         case "line":
           appendLine({ stream: event.stream, text: event.text });
           break;
@@ -481,13 +507,28 @@
     return { patchRun, finish, applyEvent };
   }
 
-  // Starts (or, if the backend's already tailing this run_id, no-ops into)
-  // watching `runId`'s full backlog-then-live journal tail, registering its
-  // handler in the shared `activeTails` map so the one app-wide subscription
-  // (see `onMount`) routes its events here by run_id.
+  // Starts watching `runId`'s full backlog-then-live journal tail,
+  // registering its handler in the shared `activeTails` map so the one
+  // app-wide subscription (see `onMount`) routes its events here by run_id.
+  //
+  // Fix round 2: the backend's `tail_run` no longer no-ops on an
+  // already-tailed run_id — it cancels whatever's currently tailing it and
+  // restarts from offset 0 (see `journal::TailRegistry::claim`), so calling
+  // this is a genuine (if harmless, thanks to the generation fence) restart,
+  // not a safe-by-default re-registration. This function's own job is just
+  // "make the current-generation tail for `runId` exist" — it is NOT
+  // responsible for deciding whether one already exists; callers that only
+  // want to avoid restarting a tail they're already actively handling must
+  // check `activeTails.has(runId)` themselves first (see `maybeLazyTail`).
+  // The legitimate restart sites — reconcile's refresh-branch catch-up, a
+  // reseed superseding an old run_id, and eject-then-remount (the backend's
+  // old tail for an ejected run keeps going, uncancelled, with nobody
+  // listening — see `handleEjectDevice` — so this is exactly what recovers
+  // the full backlog on remount instead of silently picking up wherever that
+  // orphaned tail happened to leave off) — call this unconditionally.
   function startTail(path: string, commandId: string, runId: string) {
     const { applyEvent } = makeRunHandlers(path, commandId, runId);
-    activeTails.set(runId, applyEvent);
+    activeTails.set(runId, { apply: applyEvent, gen: null });
     void tailRun(path, runId);
   }
 
@@ -505,6 +546,10 @@
     const path = repoPath;
     const record = runsByRepo[path]?.[commandId];
     if (!record || record.running || record.lines.length > 0) return;
+    // Fix round 2: don't restart a tail this frontend is already actively
+    // handling (see `startTail`'s doc comment) — a lazy tail is only for a
+    // run_id nobody's watching yet.
+    if (activeTails.has(record.runId)) return;
     startTail(path, commandId, record.runId);
   }
 
@@ -559,25 +604,16 @@
           // normally beat us here; this is cheap insurance against ever
           // missing it — real now that Step 1 makes `activeTails` populated
           // for every run source, not just hydration/poll/lazy ones). A
-          // fresh tail replays the backlog from offset 0, so reset the
-          // replayable fields first — otherwise every line this record
-          // already streamed live would be appended a second time on top of
-          // itself. (This manual reset is a stand-in for fix round 2's
-          // generation-fenced in-band reset — see docs/run-journal.md.)
+          // fresh tail always replays the backlog from offset 0, so the
+          // record's replayable fields get reset in-band by the restarted
+          // tail's leading `tail_start` event (fix round 2 — see
+          // `applyEvent`'s `tail_start` case) rather than manually here —
+          // this branch's only job is deciding *whether* to restart.
           if (
             current!.running &&
             summary.status !== "running" &&
             !activeTails.has(current!.runId)
           ) {
-            forRepo[commandId] = {
-              ...current!,
-              lines: [],
-              step: null,
-              stepHistory: [],
-              progress: null,
-              status: null,
-            };
-            changed = true;
             startTail(path, commandId, current!.runId);
           }
           break;
@@ -842,7 +878,10 @@
     // already there (closing the window where a poll could otherwise decide
     // nobody's tailing a run that's actually just about to be). Registering
     // late (after `await runCommand`) would leave exactly that window open.
-    activeTails.set(runId, applyEvent);
+    // `gen: null` here is purely frontend bookkeeping — the backend hasn't
+    // been asked to tail anything yet, so there's no generation to adopt
+    // until `startTail` below actually claims one.
+    activeTails.set(runId, { apply: applyEvent, gen: null });
 
     try {
       await runCommand(path, commandId, values, runId);
@@ -851,12 +890,13 @@
       finish(null, false, String(e));
       return;
     }
-    // The spawn succeeded — start (or, if somehow already started, no-op
-    // into) the actual journal tail. `startTail` re-registers this same
-    // handler in `activeTails` (a harmless `Map.set` over the entry above)
-    // and is the one place that invokes the backend's `tail_run` — the
-    // single tail-creation path every run source in the app now shares (see
-    // `activeTails`'s doc comment).
+    // The spawn succeeded — start the actual journal tail. `startTail`
+    // re-registers this same handler in `activeTails` (a harmless
+    // `Map.set` over the entry above) and is the one place that invokes the
+    // backend's `tail_run` — the single tail-creation path every run source
+    // in the app now shares (see `activeTails`'s doc comment). This is the
+    // run_id's first backend claim (generation 1): nothing was tailing it
+    // on the backend side before now, only this frontend bookkeeping.
     startTail(path, commandId, runId);
   }
 
@@ -905,10 +945,24 @@
   // up once, for the app's whole lifetime, independent of which device is
   // active or mounted at all (a background device's tail keeps delivering
   // here even while its device sits inactive in the rack).
+  //
+  // Fix round 2's generation fence: `tail_start` always adopts its own
+  // `tail_gen` as this run_id's current generation (before being applied,
+  // so its own in-band field-reset — see `applyEvent`'s `tail_start` case —
+  // runs against the freshly-adopted generation, though the two are
+  // independent). Every other event is gated through `shouldAcceptEvent`
+  // first: a `tail_gen` that doesn't match the adopted one is a straggler
+  // from a tail that's since been cancelled and superseded, and must never
+  // reach the record.
   const unsubscribeRunOutput = subscribeRunOutput((event) => {
-    const handler = activeTails.get(event.run_id);
-    if (!handler) return;
-    handler(event);
+    const entry = activeTails.get(event.run_id);
+    if (!entry) return;
+    if (event.kind === "tail_start") {
+      entry.gen = event.tail_gen;
+    } else if (!shouldAcceptEvent(entry.gen, event.tail_gen)) {
+      return;
+    }
+    entry.apply(event);
     if (event.kind === "exit") activeTails.delete(event.run_id);
   });
 

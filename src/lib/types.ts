@@ -77,11 +77,36 @@ export interface DoctorReport {
 // Unix only: on Windows nothing sets `PULT_EVENTS`, so these three kinds
 // simply never arrive there; stdout/stderr `line`s and the terminal `exit`
 // still do.
+//
+// `tail_gen` (fix round 2's generation-fenced tail restart —
+// src-tauri/src/journal.rs's `TailRegistry`) is additive on every kind but
+// `tail_start` itself: each tail stamps every event it emits with its own
+// generation number, and its very first emission is always `tail_start`,
+// carrying that generation as a required field. +page.svelte's shared
+// subscription router adopts a `tail_start`'s `tail_gen` as "the current
+// generation" for that run_id and drops any later event whose `tail_gen`
+// doesn't match (a straggler from a since-cancelled, superseded tail) — see
+// `shouldAcceptEvent` in `$lib/tailGen.ts`. Absent `tail_gen` (the mock
+// backend never sets it, and never emits `tail_start` at all) is accepted
+// unconditionally, same as a match: there's no generation to fence against.
 export type RunEvent =
-  | { kind: "line"; run_id: string; stream: "stdout" | "stderr"; text: string }
-  | { kind: "step"; run_id: string; k: number; n: number; name: string }
-  | { kind: "progress"; run_id: string; pct: number | null; text: string | null }
-  | { kind: "status"; run_id: string; text: string }
+  | { kind: "tail_start"; run_id: string; tail_gen: number }
+  | {
+      kind: "line";
+      run_id: string;
+      stream: "stdout" | "stderr";
+      text: string;
+      tail_gen?: number;
+    }
+  | { kind: "step"; run_id: string; k: number; n: number; name: string; tail_gen?: number }
+  | {
+      kind: "progress";
+      run_id: string;
+      pct: number | null;
+      text: string | null;
+      tail_gen?: number;
+    }
+  | { kind: "status"; run_id: string; text: string; tail_gen?: number }
   | {
       kind: "exit";
       run_id: string;
@@ -95,6 +120,7 @@ export type RunEvent =
        *  only its canned crashed-history replay in `tailRun` does, purely to
        *  demo the crashed-rendering surface). */
       crashed?: boolean;
+      tail_gen?: number;
     };
 
 export interface OutputLine {
