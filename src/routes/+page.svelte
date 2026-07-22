@@ -393,22 +393,41 @@
     // Terminal states share one summary-line shape (the output module's
     // final "✓ done in M:SS" / "✗ exited with code N after M:SS" / "■
     // stopped after M:SS" / "⚠ crashed …" line — see RunView/OutputPane) so
-    // every way a run can end goes through the same bookkeeping.
+    // every way a run can end goes through the same bookkeeping. This also
+    // has to handle a REPLAY correctly, not just a run that just finished
+    // live: a lazily-tailed already-terminal run's journaled exit arrives
+    // here minutes or days after the fact (see `maybeLazyTail`), so —
+    // `endedAt` only ever gets set once, from whichever `finish` call
+    // reaches it first (a live run has none yet; a replayed one was already
+    // seeded with its real one by `recordFromSummary` and must keep it —
+    // Date.now() here would silently overwrite history with "just now").
+    // `dur` is derived from that same real `endedAt`, never from "how long
+    // ago did this call happen to run", which for a replay is the run's AGE,
+    // not its duration. And `applyBoardOutcome`'s transient/latching
+    // overlays are themselves an "this just happened" signal — replaying an
+    // old run must not blink the board as if it just finished (a replayed
+    // failure is already latched, seeded up front by `latchFailureFromSummary`;
+    // nothing is lost by skipping it here).
     function finish(
       exitCode: number | null,
       stopped: boolean,
       errorText: string | null,
       crashed: boolean = false,
     ) {
+      let wasLive = false;
       const applied = patchRun((current) => {
-        const dur = formatDuration(Date.now() - current.startedAt);
+        wasLive = current.running;
+        const endedAt = current.endedAt ?? Date.now();
+        const dur = formatDuration(endedAt - current.startedAt);
         let text: string;
         let outcome: NonNullable<OutputLine["outcome"]>;
         if (errorText !== null) {
           text = errorText;
           outcome = "error";
         } else if (crashed) {
-          text = `⚠ crashed — pult stopped without recording an exit (after ${dur})`;
+          // No "(after X)" here — a crash never journals an end time, so
+          // any duration is an invented one, not a real answer.
+          text = `⚠ crashed — pult stopped without recording an exit`;
           outcome = "crashed";
         } else if (stopped) {
           text = `■ stopped after ${dur}`;
@@ -426,11 +445,11 @@
           stopped,
           crashed,
           exitCode,
-          endedAt: Date.now(),
+          endedAt,
           lines: [...current.lines, { stream: "exit", text, outcome }],
         };
       });
-      if (applied) applyBoardOutcome(path, commandId, { stopped, exitCode, errorText, crashed });
+      if (applied && wasLive) applyBoardOutcome(path, commandId, { stopped, exitCode, errorText, crashed });
     }
 
     function applyEvent(event: RunEvent) {
@@ -563,6 +582,21 @@
         changed = true;
         if (summary.status === "running") startTail(path, commandId, summary.run_id);
       } else if (current.running && summary.status !== "running" && !activeTails.has(current.runId)) {
+        // Catch-up: this record still says running but the journal no
+        // longer does, and nothing is actively tailing it (the tail's own
+        // synthesized exit should normally beat us here). A fresh tail
+        // replays the backlog from offset 0, so reset the replayable
+        // fields first — otherwise every line this record already
+        // streamed live would be appended a second time on top of itself.
+        forRepo[commandId] = {
+          ...current,
+          lines: [],
+          step: null,
+          stepHistory: [],
+          progress: null,
+          status: null,
+        };
+        changed = true;
         startTail(path, commandId, current.runId);
       }
     }
