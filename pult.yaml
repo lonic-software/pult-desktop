@@ -23,13 +23,11 @@ commands:
     title: Run (dev mode)
     category: Develop
     description: >-
-      Starts the Tauri dev server (Vite + Tauri, hot reload). It blocks until
-      you Ctrl+C, and pult-desktop has no pty runner yet (see README "Next
-      steps"), so it can't run this in-app — run `pult dev` from a real
-      terminal.
+      Starts the Tauri dev server (Vite + Tauri, hot reload). Output is
+      captured and journaled, so it shows up in-app as it happens — it still
+      blocks until you Ctrl+C or stop it from there.
     check: "command -v npm && command -v cargo"
-    interactive: true
-    run: "npm run tauri dev"
+    run: "FORCE_COLOR=1 CARGO_TERM_COLOR=always npm run tauri dev"
 
   - id: mock
     title: Run the mock board
@@ -40,10 +38,11 @@ commands:
       binary or Tauri build needed. The demo runs cover a determinate
       progress bar with stages (aws:deploy), an indeterminate one (status), a
       run that fails (import), and a stoppable long-running one (test:smoke).
-      Opens your browser automatically and blocks until you Ctrl+C.
+      Opens your browser automatically, and its output is captured and
+      journaled, so it shows up in-app — it still blocks until you Ctrl+C or
+      stop it from there.
     check: "command -v npm"
-    interactive: true
-    run: "VITE_MOCK=1 npm run dev -- --open"
+    run: "FORCE_COLOR=1 VITE_MOCK=1 npm run dev -- --open"
 
   - id: mock-app
     title: Run the mock app
@@ -55,10 +54,10 @@ commands:
       scripted fake backend. The same demo runs as `mock` (aws:deploy
       determinate+stages, status indeterminate, import failing, test:smoke
       stoppable). The first run compiles the Rust side, so the window takes
-      longer to appear, and it blocks until you Ctrl+C.
+      longer to appear; output is captured and journaled, so it shows up
+      in-app — it still blocks until you Ctrl+C or stop it from there.
     check: "command -v npm && command -v cargo"
-    interactive: true
-    run: "VITE_MOCK=1 npm run tauri dev"
+    run: "FORCE_COLOR=1 CARGO_TERM_COLOR=always VITE_MOCK=1 npm run tauri dev"
 
   - id: build
     title: Build bundles
