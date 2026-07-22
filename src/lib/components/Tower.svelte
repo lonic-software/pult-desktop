@@ -185,6 +185,8 @@
      well's own chrome renders immediately, so a doctor-latency gap reads as
      dark hardware, not missing UI. */
   .well {
+    position: relative; /* containing block for `.well::before`'s ambient
+    wash below */
     flex: 1;
     min-height: 0;
     padding: 6px;
@@ -194,6 +196,29 @@
       inset 0 1px 3px var(--well-inset, rgba(0, 0, 0, 0.75)),
       0 0 18px -2px var(--glow, transparent);
     transition: box-shadow 200ms ease;
+  }
+
+  /* Ambient wash — verbatim technique from Meter.svelte's `.well::before`
+     (see that file's comment for why this needs its own element/property
+     rather than a third layer on `.well`'s own animated box-shadow), scaled
+     up for the tower's much larger well. The one difference from
+     Meter.svelte: `--meter-glow-color`/`--meter-glow-level` are NOT set
+     here — RunView.svelte computes them once (tower.ts's `towerGlowVars`,
+     from the same `TowerDisplay` this component already renders) and sets
+     them as inline custom properties on the page root (`.run-view`), so the
+     params/stages/output screens across the page (crt.css's
+     `.pult-crt::before`) read the exact same live color/level for their own
+     "shine-back" reflection — one source of truth for both, since a var
+     set here on the tower's own well could never reach a sibling subtree
+     via inheritance. Falls back to `transparent`/`0` (inert) if this is
+     ever rendered outside that ancestor. */
+  .well::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: 0 0 120px 16px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 32%), transparent);
+    transition: box-shadow 420ms ease;
   }
 
   .well.glow-green {

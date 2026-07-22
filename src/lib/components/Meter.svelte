@@ -240,11 +240,49 @@
       ? litCount
       : -1,
   );
+
+  // Ambient wash (visual-polish addendum to docs/design-language.md's
+  // "Analog liveness"): a second, much larger and much subtler glow layer
+  // behind the well — "the wall behind a VU meter in a dark studio" — that
+  // colors the card/module around the meter. Unlike the flicker/breathe
+  // system above, this layer never animates on a keyframe: it only ever
+  // moves via a slow CSS `transition` (see `.well::before` below), so it
+  // reads as the room settling into a new light level, not more texture.
+  // Self-contained to this component (the vars are set and consumed on the
+  // same `.well` element, `.well::before` just inherits them) since the
+  // board has no nearby surface to reflect onto — contrast RunView's tower,
+  // where the equivalent vars are set on the *page* root so the far-away
+  // screens can read them too (see tower.ts's `towerGlowVars`).
+  //
+  // Color mirrors the well's own `--glow` mapping one-for-one (see the
+  // `.well.glow-*` rules below) — success/stopped read the same hue as
+  // ready/running rather than inventing new ones for a state that's on
+  // screen for a moment. no-check/none never glow here either, same as they
+  // never flicker (a "no signal"/dark reading shouldn't warm anything).
+  const AMBIENT_COLOR: Partial<Record<MeterState, string>> = {
+    running: "var(--accent)",
+    ready: "var(--lamp-green)",
+    failed: "var(--lamp-red)",
+    success: "var(--lamp-green)",
+    "run-failed": "var(--lamp-red)",
+    stopped: "var(--accent)",
+  };
+  const ambientColor = $derived(AMBIENT_COLOR[displayState] ?? "transparent");
+  // Reuses the same litCount fraction that drives the segments themselves
+  // (docs/design-language.md's "Level = how much") so a meter that's barely
+  // lit washes barely at all, and a full/blinking column washes at its
+  // strongest — one number for both instruments, not a second one invented
+  // for this layer. no-check's single lit segment (1/5) would otherwise
+  // read as a faint wash despite the well itself never breathing there, so
+  // it's zeroed explicitly, matching `flickerTipIndex`'s own exclusion.
+  const ambientLevel = $derived(
+    displayState === "no-check" || displayState === "none" ? 0 : litCount / 5,
+  );
 </script>
 
 <div
   class="well {size} glow-{displayState}"
-  style="--flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms; --blink-duration: {blinking.blinkDuration}ms; --blink-delay: {blinking.blinkDelay}ms"
+  style="--flicker-duration: {flickerDuration}ms; --flicker-delay: {flickerDelay}ms; --level-duration: {levelDuration}ms; --level-delay: {levelDelay}ms; --level-delay-2: {levelDelay2}ms; --blink-duration: {blinking.blinkDuration}ms; --blink-delay: {blinking.blinkDelay}ms; --meter-glow-color: {ambientColor}; --meter-glow-level: {ambientLevel}"
   aria-hidden="true"
 >
   <div class="segments">
@@ -282,6 +320,8 @@
      conditionally adding/removing a shadow layer, so the two-layer value
      can interpolate smoothly instead of popping. */
   .well {
+    position: relative; /* containing block for `.well::before`'s ambient
+    wash below */
     flex: none;
     padding: 4px 3px;
     border-radius: 3px;
@@ -295,6 +335,36 @@
   .well.lg {
     padding: 5px 4px;
     border-radius: 4px;
+  }
+
+  /* Ambient wash (see the script block's comment above `AMBIENT_COLOR`): a
+     second, separate box-shadow on its own pseudo-element rather than a
+     third layer on `.well`'s own `box-shadow` — that property is already
+     owned by the `lamp-breathe`/blink keyframes above, and a CSS animation
+     always wins the *whole* property over a transition, so a wash sharing
+     it could never ease, only snap. Living on an independent element/
+     property is what lets this one keep a real `transition` while the
+     flicker keeps its own sharp keyframes, with neither fighting the other.
+     A `color-mix` percentage driven by `--meter-glow-level` (0..1, see the
+     script) rather than a separate `opacity` — one property to transition,
+     and it composes with the color swap in the same interpolation. Sized
+     via a large blur + modest spread (well beyond the well's own ~11-19px
+     scale) so it reads as the surrounding pad/panel warming, not a bigger
+     LED; kept modest enough that it stays inside the card/module's own box
+     on every real call site rather than banking on bleeding past an
+     ancestor's edge (CommandCard's `.card`/Board's `.module` don't clip, so
+     a little overflow would be fine, but nothing here depends on it). */
+  .well::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    box-shadow: 0 0 52px 6px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 28%), transparent);
+    transition: box-shadow 420ms ease;
+  }
+
+  .well.lg::before {
+    box-shadow: 0 0 70px 9px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 28%), transparent);
   }
 
   .well.glow-running {

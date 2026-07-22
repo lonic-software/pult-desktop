@@ -87,6 +87,49 @@
   text-shadow: 0 0 5px rgba(158, 214, 160, 0.35);
 }
 
+/* Screen "shine-back" (visual-polish addendum) — a reflection of the
+   details page's SIGNAL tower on this screen's own GLASS, not a phosphor
+   change: the "palette is fixed, not themed" rule above stays intact, this
+   only tints a layer sitting in front of the ink and its scan-line/vignette
+   texture (z-index above `.pult-crt::after`'s 2), the way room light
+   reflects off a tube's curved front glass without touching what's actually
+   lit behind it.
+
+   `--meter-glow-color`/`--meter-glow-level` are supplied by RunView.svelte
+   on the page root (`.run-view`), not computed here — see tower.ts's
+   `towerGlowVars` doc comment for why that ancestor, not the tower itself,
+   owns them. Every `.pult-crt` on the page (params, stages, output — the
+   three screens docs/design-language.md's "Screens" section names) picks
+   this up identically, deliberately: they're the same instrument class and
+   sit the same distance from the tower, so there's no principled reason for
+   one to shine and another not to.
+
+   The tint enters from the LEFT edge and falls off toward the right because
+   that's the edge actually facing the tower in RunView's layout (a 132px
+   tower column, then every screen to its right) — geometrically plausible,
+   not a generic vignette. Implemented as a fixed-shape mask (never
+   animated) over a plain `background-color` (an interpolable value, unlike
+   a gradient) so a state change — READY's green to a FAILED run's red, say
+   — eases smoothly via `transition` rather than a gradient's own stops
+   (which can't cross-fade) jumping. The mask gradient uses white fading to
+   transparent, not black fading to transparent — a color's LUMINANCE, not
+   just its alpha, is what some engines' legacy `-webkit-mask-image` reads,
+   and white-fading-in-alpha reveals/hides correctly under either that or
+   the modern alpha-only interpretation, where black-fading-in-alpha would
+   invert on the former. */
+.pult-crt::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  background-color: var(--meter-glow-color, transparent);
+  opacity: calc(var(--meter-glow-level, 0) * 0.22);
+  mask-image: linear-gradient(to right, white, transparent 60%);
+  -webkit-mask-image: linear-gradient(to right, white, transparent 60%);
+  transition: background-color 420ms ease, opacity 420ms ease;
+}
+
 /* The scrolling child. No positioning/overflow-direction rules here — those
    are per-module (vertical for params/output, horizontal for stages) and
    live with each module's own layout. This only carries what every screen

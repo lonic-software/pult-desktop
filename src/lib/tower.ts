@@ -180,3 +180,39 @@ export function towerDisplay(state: TowerState, progressPct: number | null): Tow
                   : "ERR"; // blink-run-failed
   return { state, level, readout, label, color, pulse };
 }
+
+/** The CSS var contract for the visual-polish ambient glow + screen
+ *  "shine-back" reflection (docs/design-language.md's "Analog liveness"):
+ *  RunView computes this ONCE from the same `TowerDisplay` it already feeds
+ *  Tower.svelte, and sets the two fields as inline custom properties
+ *  (`--meter-glow-color`/`--meter-glow-level`) on the page root — the one
+ *  ancestor shared by both the tower module and the far-away params/stages/
+ *  output screens, so a plain CSS `var()` reaches both without prop-drilling
+ *  across that DOM distance. Tower.svelte's own ambient wash (`.well::before`
+ *  there) reads the exact same two properties by inheritance rather than
+ *  recomputing this mapping a second time.
+ *
+ *  `gray` (no-check) and `none` (untrusted/dark) never glow — same rule as
+ *  Tower.svelte's `flickerEligible`: a "no signal" reading shouldn't warm
+ *  anything nearby, on the tower or on the glass across the room. */
+export interface MeterGlowVars {
+  /** A CSS color (one of the existing lamp tokens, or `transparent`) — never
+   *  a literal hex, so it already tracks the light/dark theme the same way
+   *  the tower's own glow does. */
+  color: string;
+  /** Normalized 0..1 — how much to show, not just whether to. Consumers
+   *  (the ambient wash's `color-mix` percentage, the screen reflection's
+   *  `opacity`) each apply their own modest ceiling on top of this. */
+  level: number;
+}
+
+export function towerGlowVars(display: TowerDisplay): MeterGlowVars {
+  if (display.color === "gray" || display.color === "none") return { color: "transparent", level: 0 };
+  const color =
+    display.color === "green"
+      ? "var(--lamp-green)"
+      : display.color === "red"
+        ? "var(--lamp-red)"
+        : "var(--accent)"; // amber
+  return { color, level: display.level };
+}

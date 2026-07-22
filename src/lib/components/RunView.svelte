@@ -18,7 +18,7 @@
   import { onMount, onDestroy } from "svelte";
   import type { CommandInfo, DoctorReport, Param, RunRecord } from "../types";
   import { readinessFor } from "../readiness";
-  import { towerStateFor, towerDisplay, type TowerRunInput, type TowerBlinkOverride } from "../tower";
+  import { towerStateFor, towerDisplay, towerGlowVars, type TowerRunInput, type TowerBlinkOverride } from "../tower";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, TOWER_FAILURE_BLINK_COUNT, BLINK_PERIOD_MS } from "../meterLiveness";
   import { deriveStages, stagesVisible } from "../stages";
   import { formatClock, formatDuration, formatRelative } from "../time";
@@ -271,6 +271,14 @@
   const towerState = $derived(towerStateFor(readiness, towerRunInput, towerBlink));
   const towerDisplayValue = $derived(towerDisplay(towerState, run?.progress?.pct ?? null));
 
+  // Visual-polish addendum (docs/design-language.md's "Analog liveness"):
+  // the tower's ambient wash (Tower.svelte's `.well::before`) and the
+  // params/stages/output screens' glass "shine-back" reflection (crt.css's
+  // `.pult-crt::before`) both read these two custom properties, set here
+  // (not on the tower itself) because this is the one ancestor shared by
+  // both — see tower.ts's `towerGlowVars` doc comment.
+  const meterGlow = $derived(towerGlowVars(towerDisplayValue));
+
   // ---------------------------------------------------------------------
   // A 1s ticking clock, only while mounted — drives the "elapsed M:SS"
   // meta (ticks while running) and keeps "last run Nm ago" from going
@@ -349,7 +357,10 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div class="run-view">
+<div
+  class="run-view"
+  style="--meter-glow-color: {meterGlow.color}; --meter-glow-level: {meterGlow.level}"
+>
   <div class="module tower-module">
     <span class="screw screw-tl" aria-hidden="true"></span>
     <span class="screw screw-tr" aria-hidden="true"></span>
