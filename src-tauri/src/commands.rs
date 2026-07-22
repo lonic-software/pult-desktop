@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use tauri::{AppHandle, State};
 
-use crate::journal::{self, RunSummary, TailRegistry};
+use crate::journal::{self, RunSummary, SpawnOutcomes, TailRegistry};
 use crate::pult_bin::{
     resolve_pult, run_capture, set_stored_pult_path, stderr_text, stored_pult_path,
 };
@@ -118,13 +118,14 @@ pub fn set_pult_path(app: AppHandle, path: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn run_command(
     app: AppHandle,
+    outcomes: State<'_, SpawnOutcomes>,
     path: String,
     id: String,
     run_id: String,
     values: HashMap<String, String>,
 ) -> Result<(), String> {
     let bin = resolve_pult(&app)?;
-    crate::pult_bin::spawn_run(&bin, &path, &id, &values, &run_id).await?;
+    crate::pult_bin::spawn_run(&bin, &path, &id, &values, &run_id, outcomes.inner()).await?;
     Ok(())
 }
 
@@ -146,13 +147,30 @@ pub fn list_runs(path: String) -> Vec<RunSummary> {
     journal::list_runs(&path)
 }
 
-/// Start (or no-op if already started) tailing `run_id`'s journal, emitting
-/// mapped events on the `pult://run-output` channel — the same channel
-/// `run_command` uses, so hydrating a repo's run history and a freshly
-/// spawned run are indistinguishable to the frontend once tailing begins.
+/// Start (or, per fix round 2's generation fence, cancel-and-restart)
+/// tailing `run_id`'s journal, emitting mapped events on the
+/// `pult://run-output` channel — the same channel `run_command` uses, so
+/// hydrating a repo's run history and a freshly spawned run are
+/// indistinguishable to the frontend once tailing begins. The frontend is
+/// responsible for not calling this for a run_id it's already actively
+/// handling (see `+page.svelte`'s `startTail`) — this command's own job is
+/// just "make the current-generation tail exist," not "was someone already
+/// watching" (see `journal::TailRegistry::claim`).
 #[tauri::command]
-pub fn tail_run(app: AppHandle, tails: State<'_, TailRegistry>, path: String, run_id: String) {
-    journal::tail_run(app, tails.inner().clone(), path, run_id);
+pub fn tail_run(
+    app: AppHandle,
+    tails: State<'_, TailRegistry>,
+    outcomes: State<'_, SpawnOutcomes>,
+    path: String,
+    run_id: String,
+) {
+    journal::tail_run(
+        app,
+        tails.inner().clone(),
+        outcomes.inner().clone(),
+        path,
+        run_id,
+    );
 }
 
 /// Resolve a `pick.source` param's live options: `crate::pult_bin` does the

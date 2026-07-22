@@ -54,3 +54,15 @@ commands:
   - id: sleep-loop
     title: Sleep loop
     run: "while true; do sleep 1; done"
+
+  # A slow run that produces one real line of backlog before looping
+  # forever — used by journal.rs's real-pult-binary restart e2e test (fix
+  # round 2, point fix A) to prove a fresh tail_run call mid-run replays the
+  # FULL backlog (not just whatever arrives after the restart), the actual
+  # eject-remount recovery scenario against a real journaled run rather than
+  # a hand-written fixture meta.json.
+  - id: slow-drip
+    title: Slow drip
+    run: |
+      echo "first drop"
+      while true; do sleep 1; done

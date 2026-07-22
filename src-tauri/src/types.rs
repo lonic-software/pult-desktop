@@ -126,13 +126,35 @@ pub struct DoctorReport {
 /// threaded through so the frontend can tell concurrent runs apart — the
 /// event channel is shared across every in-flight run, not per-command, so
 /// without this a second run's output could get attributed to the first.
+///
+/// `tail_gen` (additive, `Option<u64>` on every variant but `TailStart`
+/// itself) is the generation-fencing field fix round 2 added
+/// (`crate::journal::TailRegistry`): every event a tail emits is stamped
+/// with the generation of that tail (see `RunEvent::stamp_tail_gen`), and a
+/// tail's very first emission is always `TailStart`, carrying that same
+/// generation as its own required field rather than the additive one — a
+/// frontend router uses it to adopt "the current generation" for a run_id
+/// and drop any later-arriving event whose `tail_gen` doesn't match (a
+/// straggler from a tail that's since been cancelled and superseded). Absent
+/// `tail_gen` (older/other producers, and every non-`TailStart` event this
+/// reader constructs directly before stamping — see `journal.rs`'s
+/// `map_event_line`/`synthesize_exit`/`emit_never_journaled`) means "no
+/// fence to check," same as a match.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunEvent {
+    /// Emitted before any other event in a tail's lifetime (see
+    /// `crate::journal::tail_run`) — signals that a fresh generation of
+    /// tailing for `run_id` has begun, so a frontend router mid-stream can
+    /// reset a record's replayable fields and adopt `tail_gen` as the
+    /// record's current generation before backlog starts arriving.
+    TailStart { run_id: String, tail_gen: u64 },
     Line {
         run_id: String,
         stream: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_gen: Option<u64>,
     },
     /// `step <k>/<n> <name>` from the `PULT_EVENTS` channel — entering step
     /// `k` of `n` (1-based). Unix only: this app only claims the channel on
@@ -142,6 +164,8 @@ pub enum RunEvent {
         k: u32,
         n: u32,
         name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_gen: Option<u64>,
     },
     /// `progress <0-100|?> [text]` from the `PULT_EVENTS` channel —
     /// `pct: None` is the indeterminate `?` form. Unix only, same caveat as
@@ -150,10 +174,17 @@ pub enum RunEvent {
         run_id: String,
         pct: Option<u8>,
         text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_gen: Option<u64>,
     },
     /// `status <text>` from the `PULT_EVENTS` channel — a transient activity
     /// line. Unix only, same caveat as `Step`.
-    Status { run_id: String, text: String },
+    Status {
+        run_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_gen: Option<u64>,
+    },
     Exit {
         run_id: String,
         code: Option<i32>,
@@ -170,5 +201,70 @@ pub enum RunEvent {
         /// producers of this event don't need to know about it.
         #[serde(default)]
         crashed: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail_gen: Option<u64>,
     },
+}
+
+impl RunEvent {
+    /// Stamp (or overwrite) this event's `tail_gen` with `gen` — the one
+    /// place every event a tail constructs gets tagged with its generation
+    /// right before reaching the Tauri channel (see
+    /// `crate::journal::tail_run`). `TailStart` already carries its
+    /// generation as a required field; stamping it again here is a harmless
+    /// no-op (same value).
+    pub fn stamp_tail_gen(self, gen: u64) -> Self {
+        match self {
+            RunEvent::TailStart { run_id, .. } => RunEvent::TailStart {
+                run_id,
+                tail_gen: gen,
+            },
+            RunEvent::Line {
+                run_id,
+                stream,
+                text,
+                ..
+            } => RunEvent::Line {
+                run_id,
+                stream,
+                text,
+                tail_gen: Some(gen),
+            },
+            RunEvent::Step {
+                run_id, k, n, name, ..
+            } => RunEvent::Step {
+                run_id,
+                k,
+                n,
+                name,
+                tail_gen: Some(gen),
+            },
+            RunEvent::Progress {
+                run_id, pct, text, ..
+            } => RunEvent::Progress {
+                run_id,
+                pct,
+                text,
+                tail_gen: Some(gen),
+            },
+            RunEvent::Status { run_id, text, .. } => RunEvent::Status {
+                run_id,
+                text,
+                tail_gen: Some(gen),
+            },
+            RunEvent::Exit {
+                run_id,
+                code,
+                stopped,
+                crashed,
+                ..
+            } => RunEvent::Exit {
+                run_id,
+                code,
+                stopped,
+                crashed,
+                tail_gen: Some(gen),
+            },
+        }
+    }
 }

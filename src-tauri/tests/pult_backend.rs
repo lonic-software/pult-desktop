@@ -113,7 +113,8 @@ async fn listing_parses_and_starts_untrusted() {
             "status",
             "import",
             "pipeline",
-            "sleep-loop"
+            "sleep-loop",
+            "slow-drip"
         ]
     );
 

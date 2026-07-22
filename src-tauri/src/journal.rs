@@ -18,11 +18,21 @@
 //! the state dir explicitly. Unit tests exercise the `_at` siblings directly
 //! with tempdirs, rather than mutating process-global env vars — which would
 //! race across the parallel test threads Rust runs by default.
+//!
+//! **Net invariant (fix round 2's generation-fenced tail restart —
+//! `TailRegistry`, below):** at most one uncancelled emitter exists per
+//! `run_id` at any moment. A run's `RunRecord` on the frontend is always
+//! exactly "the journal prefix delivered by the current-generation tail" —
+//! never a mix of two generations' events, and never silently missing
+//! everything an old, cancelled tail would have replayed (see
+//! `tail_run`/`TailRegistry::claim`).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,6 +52,12 @@ const FOLLOW_POLL: Duration = Duration::from_millis(150);
 /// appear past this point.
 const JOURNAL_APPEAR_TIMEOUT: Duration = Duration::from_secs(5);
 const JOURNAL_APPEAR_POLL: Duration = Duration::from_millis(100);
+
+/// Grace period `wait_for_run_dir_at` gives the run dir to appear after
+/// `SpawnOutcomes` reports the child already dead, before concluding this is
+/// a genuine pre-journal spawn failure rather than a benign race between the
+/// reaper recording the outcome and pult finishing its own directory setup.
+const SPAWN_FAILURE_GRACE: Duration = Duration::from_millis(300);
 
 /// How long a stopped run gets after `SIGTERM` before this app escalates to
 /// `SIGKILL` — same grace period the old in-process stop flow used.
@@ -279,15 +295,42 @@ pub fn list_runs(repo_path: &str) -> Vec<RunSummary> {
 
 // --- Stopping a run ---------------------------------------------------
 
+/// The error `stop_run` returns for anything that isn't a live, running
+/// writer — both "no meta at all" and (fix round 2's precheck) "meta exists
+/// but the run has already finished or its writer is already dead" collapse
+/// to the same operator-facing message, since from the caller's point of
+/// view they're indistinguishable: there is nothing left to stop.
+const RUN_ALREADY_FINISHED: &str = "That run has already finished or was never journaled.";
+
+/// Whether `meta` describes a run that's actually live and stoppable right
+/// now — a `Running` status backed by a live writer. Factored out from
+/// `stop_run` (fix round 2, point fix C, closing the stale-pgid signal) so
+/// the precheck is unit-testable without a filesystem, a repo dir, or
+/// `PULT_STATE_DIR` at all: a `pgid` is only ever meaningful while its
+/// writer is the live owner of that process group — once the writer's gone,
+/// the OS is free to have recycled the same pgid for an unrelated process
+/// tree, so signaling it is not "harmlessly do nothing" but "maybe kill
+/// something that has nothing to do with this run."
+fn is_stoppable(meta: &RunMeta) -> bool {
+    meta.status == Status::Running && writer_alive(meta.pid)
+}
+
 /// Stop a journaled run by its `pgid` — works identically for a run this app
 /// never spawned, since the capability lives in the journal, not in any
 /// in-process registry. `SIGTERM` to the whole group, a grace period, then
 /// `SIGKILL` if the writer is still alive.
+///
+/// Precheck (fix round 2, point fix C — see `is_stoppable`): bails out with
+/// the same not-running error `read_meta`'s absence already uses, rather
+/// than ever calling `signal_group` against a meta that isn't both
+/// `Running` and backed by a live writer.
 #[cfg(unix)]
 pub async fn stop_run(repo_path: &str, run_id: &str) -> Result<(), String> {
     let run_dir = run_dir_for(repo_path, run_id)?;
-    let meta = read_meta(&run_dir)
-        .ok_or_else(|| "That run has already finished or was never journaled.".to_string())?;
+    let meta = read_meta(&run_dir).ok_or_else(|| RUN_ALREADY_FINISHED.to_string())?;
+    if !is_stoppable(&meta) {
+        return Err(RUN_ALREADY_FINISHED.to_string());
+    }
     let pgid = meta.pgid.ok_or_else(|| {
         "This run has no recorded process group to stop (older pult binary?).".to_string()
     })?;
@@ -351,12 +394,14 @@ fn map_event_line(line: &str, run_id: &str) -> Option<RunEvent> {
             run_id: run_id.to_string(),
             stream: doc.get("stream")?.as_str()?.to_string(),
             text: doc.get("text")?.as_str()?.to_string(),
+            tail_gen: None,
         }),
         "step" => Some(RunEvent::Step {
             run_id: run_id.to_string(),
             k: doc.get("k")?.as_u64()? as u32,
             n: doc.get("n")?.as_u64()? as u32,
             name: doc.get("name")?.as_str()?.to_string(),
+            tail_gen: None,
         }),
         "progress" => Some(RunEvent::Progress {
             run_id: run_id.to_string(),
@@ -365,10 +410,12 @@ fn map_event_line(line: &str, run_id: &str) -> Option<RunEvent> {
                 .get("text")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            tail_gen: None,
         }),
         "status" => Some(RunEvent::Status {
             run_id: run_id.to_string(),
             text: doc.get("text")?.as_str()?.to_string(),
+            tail_gen: None,
         }),
         "exit" => Some(RunEvent::Exit {
             run_id: run_id.to_string(),
@@ -378,6 +425,7 @@ fn map_event_line(line: &str, run_id: &str) -> Option<RunEvent> {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             crashed: false,
+            tail_gen: None,
         }),
         _ => None,
     }
@@ -388,6 +436,21 @@ fn map_event_line(line: &str, run_id: &str) -> Option<RunEvent> {
 /// trailing newline yet — a crash mid-append) is "not yet written": rewind
 /// to its start and pick it up whole on a later pass, matching the spec's
 /// reader rule exactly.
+///
+/// Reads raw bytes (`read_until(b'\n', …)`) rather than `BufRead::read_line`
+/// deliberately: `read_line` validates UTF-8 as it goes, so a torn read that
+/// happens to split a multibyte character mid-sequence (a crash mid-append
+/// of non-ASCII text — always possible, `text` is free-form command output)
+/// makes it return an error immediately, killing the tail outright instead
+/// of just rewinding and trying again next pass like every other kind of
+/// torn line. Checking completeness (`ends_with(b'\n')`) on the raw bytes
+/// *first*, before any UTF-8 conversion, means a torn multibyte tail hits
+/// the exact same "not yet written, rewind" path as a torn ASCII one; the
+/// lossy conversion only happens once a full line is already in hand, and is
+/// purely for `map_event_line`'s `serde_json::from_str`, which needs `&str` —
+/// `unwrap_or(REPLACEMENT_CHARACTER)`-style lossiness here would only ever
+/// affect a line pult itself wrote with invalid UTF-8 in the first place
+/// (this reader doesn't invent the torn read, it just must not crash on it).
 fn drain_events(
     file: &mut std::fs::File,
     offset: &mut u64,
@@ -396,17 +459,18 @@ fn drain_events(
     file.seek(SeekFrom::Start(*offset))?;
     let mut reader = BufReader::new(&*file);
     let mut events = Vec::new();
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf)?;
         if n == 0 {
             break;
         }
-        if !line.ends_with('\n') {
-            break; // torn final line — not yet written, rewind next pass
+        if buf.last() != Some(&b'\n') {
+            break; // torn final line (possibly mid-multibyte) — not yet written, rewind next pass
         }
         *offset += n as u64;
+        let line = String::from_utf8_lossy(&buf);
         if let Some(event) = map_event_line(line.trim_end(), run_id) {
             events.push(event);
         }
@@ -424,6 +488,16 @@ fn drain_events(
 /// terminal state**, because the writer appends the `exit` event *then*
 /// flips meta — anything written in that gap (always including a
 /// same-tick `exit` event) would otherwise never be read.
+///
+/// `cancel` (fix round 2's generation-fenced restart — `TailRegistry`) is
+/// checked between every drain pass and right after every `sleep()`: the
+/// moment it flips, this returns immediately without doing the
+/// observe-terminal final drain — a cancelled tail's caller
+/// (`tail_existing_run`) is responsible for never treating that early
+/// return as "the run ended," i.e. never synthesizing an exit on top of it.
+/// Events already drained and emitted before cancellation was noticed stay
+/// emitted (they're real backlog); only the *decision to keep going* is
+/// what stops.
 fn follow_events(
     file: &mut std::fs::File,
     offset: &mut u64,
@@ -431,14 +505,21 @@ fn follow_events(
     mut emit: impl FnMut(RunEvent),
     mut observe: impl FnMut() -> Option<RunMeta>,
     mut sleep: impl FnMut(),
+    cancel: &AtomicBool,
 ) -> std::io::Result<()> {
     loop {
         for event in drain_events(file, offset, run_id)? {
             emit(event);
         }
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         match observe() {
             Some(meta) if meta.status == Status::Running && writer_alive(meta.pid) => {
                 sleep();
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
             }
             _ => {
                 for event in drain_events(file, offset, run_id)? {
@@ -466,6 +547,7 @@ fn synthesize_exit(run_id: &str, meta: Option<&RunMeta>) -> RunEvent {
                 code: m.exit_code,
                 stopped: m.status == Status::Stopped,
                 crashed,
+                tail_gen: None,
             }
         }
         None => RunEvent::Exit {
@@ -473,6 +555,7 @@ fn synthesize_exit(run_id: &str, meta: Option<&RunMeta>) -> RunEvent {
             code: None,
             stopped: false,
             crashed: true,
+            tail_gen: None,
         },
     }
 }
@@ -483,11 +566,27 @@ fn synthesize_exit(run_id: &str, meta: Option<&RunMeta>) -> RunEvent {
 /// (journaled if present, synthesized otherwise — see `synthesize_exit`).
 /// Assumes `run_dir` and its `events.jsonl` already exist; callers waiting
 /// out the spawn race go through `wait_for_run_dir_at` first.
-fn tail_existing_run(run_dir: &Path, run_id: &str, mut emit: impl FnMut(RunEvent)) {
+///
+/// `cancel` (fix round 2 — see `TailRegistry`): checked before doing
+/// anything, and again right after `follow_events` returns, in both cases
+/// short-circuiting *without* emitting a synthesized exit — a cancelled
+/// tail must never emit a terminal event at all, since the replacement tail
+/// that cancelled it now owns this run_id and is the only one entitled to.
+fn tail_existing_run(
+    run_dir: &Path,
+    run_id: &str,
+    cancel: &AtomicBool,
+    mut emit: impl FnMut(RunEvent),
+) {
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     let mut file = match std::fs::File::open(run_dir.join("events.jsonl")) {
         Ok(f) => f,
         Err(_) => {
-            emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
+            if !cancel.load(Ordering::SeqCst) {
+                emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
+            }
             return;
         }
     };
@@ -505,36 +604,95 @@ fn tail_existing_run(run_dir: &Path, run_id: &str, mut emit: impl FnMut(RunEvent
         },
         || read_meta(run_dir),
         || std::thread::sleep(FOLLOW_POLL),
+        cancel,
     );
     if result.is_err() {
         // An I/O error mid-tail (file vanished, permissions changed) is as
         // terminal as any other "nothing more is coming" state.
         saw_exit = false;
     }
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     if !saw_exit {
         emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
     }
 }
 
+/// The outcome `wait_for_run_dir_at` reaches once it stops waiting: either
+/// the run dir showed up, or one of two distinct "it never will" reasons —
+/// see fix round 2's `SpawnOutcomes` doc comment for why these are kept
+/// separate rather than collapsed into one generic failure.
+#[derive(Debug)]
+enum WaitForRunDir {
+    Found(PathBuf),
+    /// The 5s ceiling elapsed with nothing recorded either way: too-old
+    /// pult binary without `--run-id` support, or no journal state dir
+    /// resolvable at all. The genuinely-unknown case — `emit_never_journaled`
+    /// is still the right fallback here.
+    NeverJournaled,
+    /// The spawned child was already dead (per `SpawnOutcomes`) and the run
+    /// dir still hadn't appeared after `SPAWN_FAILURE_GRACE` — a pre-journal
+    /// spawn failure (bad command id, bad flag, …) whose real diagnostics
+    /// this reader can now report instead of the generic fallback text.
+    SpawnFailed {
+        exit_code: Option<i32>,
+        stderr_tail: Vec<String>,
+    },
+    /// The tail was cancelled (fix round 2 — `TailRegistry`) while still
+    /// waiting for the run dir. Never surfaces any emission at all: the
+    /// tail that cancelled this one owns `run_id` now.
+    Cancelled,
+}
+
 /// Wait for pult to create `run_id`'s journal directory under an explicit
-/// state dir, bounded by `timeout` (polling every `poll`). The seam tests
-/// use directly; `wait_for_run_dir` below is the real-env-reading wrapper.
+/// state dir, bounded by `timeout` (polling every `poll`). While waiting,
+/// also probes `outcomes` for a pre-journal spawn failure (fix round 2's
+/// point fix B): if the reaper already recorded that the child died and the
+/// run dir still hasn't appeared `SPAWN_FAILURE_GRACE` later, this aborts
+/// immediately rather than sitting out the rest of the 5s ceiling — see
+/// `WaitForRunDir::SpawnFailed`. The seam tests use directly; `wait_for_run_dir`
+/// below is the real-env-reading wrapper.
 fn wait_for_run_dir_at(
     state: &Path,
     repo_path: &str,
     run_id: &str,
     timeout: Duration,
     poll: Duration,
-) -> Option<PathBuf> {
-    let run_dir = run_dir_for_at(state, repo_path, run_id).ok()?;
+    outcomes: &SpawnOutcomes,
+    cancel: &AtomicBool,
+) -> WaitForRunDir {
+    let Ok(run_dir) = run_dir_for_at(state, repo_path, run_id) else {
+        return WaitForRunDir::NeverJournaled;
+    };
     let events_path = run_dir.join("events.jsonl");
-    let deadline = std::time::Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
+    let mut dead_since: Option<Instant> = None;
     loop {
         if events_path.exists() {
-            return Some(run_dir);
+            return WaitForRunDir::Found(run_dir);
         }
-        if std::time::Instant::now() >= deadline {
-            return None;
+        if cancel.load(Ordering::SeqCst) {
+            return WaitForRunDir::Cancelled;
+        }
+        match outcomes.peek(run_id) {
+            Some(entry) => {
+                let since = *dead_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= SPAWN_FAILURE_GRACE {
+                    // Prefer the freshest read (`take`, which re-peeks under
+                    // the lock) but fall back to what we already have if
+                    // something else consumed it in the meantime.
+                    let entry = outcomes.take(run_id).unwrap_or(entry);
+                    return WaitForRunDir::SpawnFailed {
+                        exit_code: entry.exit_code,
+                        stderr_tail: entry.stderr_tail,
+                    };
+                }
+            }
+            None => dead_since = None,
+        }
+        if Instant::now() >= deadline {
+            return WaitForRunDir::NeverJournaled;
         }
         std::thread::sleep(poll);
     }
@@ -551,38 +709,95 @@ fn emit_never_journaled(run_id: &str, mut emit: impl FnMut(RunEvent)) {
         text: "pult never journaled this run — check that pult is installed and supports \
                --run-id (older versions don't journal)"
             .to_string(),
+        tail_gen: None,
     });
     emit(RunEvent::Exit {
         run_id: run_id.to_string(),
         code: None,
         stopped: false,
         crashed: false,
+        tail_gen: None,
+    });
+}
+
+/// Emit a captured pre-journal spawn failure (fix round 2's point fix B):
+/// the real stderr pult itself wrote, line by line, then a real `Exit`
+/// carrying the child's actual exit code — in place of
+/// `emit_never_journaled`'s generic "pult never journaled this run" text,
+/// which used to be the only fallback here regardless of whether pult
+/// crashed instantly with a clear diagnostic or genuinely never ran at all.
+fn emit_spawn_failure(
+    run_id: &str,
+    exit_code: Option<i32>,
+    stderr_tail: &[String],
+    mut emit: impl FnMut(RunEvent),
+) {
+    for line in stderr_tail {
+        emit(RunEvent::Line {
+            run_id: run_id.to_string(),
+            stream: "stderr".to_string(),
+            text: line.clone(),
+            tail_gen: None,
+        });
+    }
+    emit(RunEvent::Exit {
+        run_id: run_id.to_string(),
+        code: exit_code,
+        stopped: false,
+        crashed: false,
+        tail_gen: None,
     });
 }
 
 /// The blocking core of a tail, seamed on an explicit state dir: waits out
 /// the spawn race, then tails to completion (`tail_existing_run`), or — if
 /// pult never journaled this run at all — emits the "never journaled"
-/// fallback. Directly unit-testable with tempdir fixtures; `tail_run_blocking`
-/// below is the real-env-reading wrapper `tail_run` actually calls.
+/// fallback, or — if the run dir never appeared because the spawn itself
+/// failed — emits the captured real stderr/exit instead (see
+/// `WaitForRunDir`). Directly unit-testable with tempdir fixtures;
+/// `tail_run_blocking` below is the real-env-reading wrapper `tail_run`
+/// actually calls. `cancel` is threaded all the way through so a restart mid-wait
+/// (fix round 2) never lets this emit anything at all on the way out.
+#[allow(clippy::too_many_arguments)]
 fn tail_run_blocking_at(
     state: &Path,
     repo_path: &str,
     run_id: &str,
     timeout: Duration,
     poll: Duration,
+    outcomes: &SpawnOutcomes,
+    cancel: &AtomicBool,
     emit: impl FnMut(RunEvent),
 ) {
-    match wait_for_run_dir_at(state, repo_path, run_id, timeout, poll) {
-        Some(run_dir) => tail_existing_run(&run_dir, run_id, emit),
-        None => emit_never_journaled(run_id, emit),
+    match wait_for_run_dir_at(state, repo_path, run_id, timeout, poll, outcomes, cancel) {
+        WaitForRunDir::Found(run_dir) => tail_existing_run(&run_dir, run_id, cancel, emit),
+        WaitForRunDir::NeverJournaled => {
+            if !cancel.load(Ordering::SeqCst) {
+                emit_never_journaled(run_id, emit);
+            }
+        }
+        WaitForRunDir::SpawnFailed {
+            exit_code,
+            stderr_tail,
+        } => {
+            if !cancel.load(Ordering::SeqCst) {
+                emit_spawn_failure(run_id, exit_code, &stderr_tail, emit);
+            }
+        }
+        WaitForRunDir::Cancelled => {}
     }
 }
 
 /// Every step here is synchronous std I/O plus `std::thread::sleep`,
 /// deliberately not async, so it can run on a `spawn_blocking` thread (see
 /// `tail_run` below) without ever blocking the async executor.
-fn tail_run_blocking(repo_path: &str, run_id: &str, emit: impl FnMut(RunEvent)) {
+fn tail_run_blocking(
+    repo_path: &str,
+    run_id: &str,
+    outcomes: &SpawnOutcomes,
+    cancel: &AtomicBool,
+    emit: impl FnMut(RunEvent),
+) {
     match state_dir() {
         Some(state) => tail_run_blocking_at(
             &state,
@@ -590,40 +805,183 @@ fn tail_run_blocking(repo_path: &str, run_id: &str, emit: impl FnMut(RunEvent)) 
             run_id,
             JOURNAL_APPEAR_TIMEOUT,
             JOURNAL_APPEAR_POLL,
+            outcomes,
+            cancel,
             emit,
         ),
-        None => emit_never_journaled(run_id, emit),
+        None => {
+            if !cancel.load(Ordering::SeqCst) {
+                emit_never_journaled(run_id, emit);
+            }
+        }
     }
 }
 
-/// Registry of run ids currently being tailed, so hydration, a fresh spawn
-/// and a poll can never double-tail the same run — `tail_run` on an
-/// already-tailed id is a no-op. A tail removes its own entry the moment it
-/// reaches its terminal emission.
+/// One entry in `SpawnOutcomes`: what `pult_bin::spawn_run`'s reaper
+/// observed once the freshly-spawned child exited, captured before this
+/// module even knows whether pult ever got as far as creating a run
+/// directory at all.
+#[derive(Clone)]
+struct SpawnOutcomeEntry {
+    exit_code: Option<i32>,
+    /// Bounded to ~8KB by the reaper (`pult_bin::spawn_run`), keeping the
+    /// *tail* of the child's stderr on overflow — the most recent lines are
+    /// almost always the actual diagnostic (a usage error, a panic), not
+    /// whatever came first.
+    stderr_tail: Vec<String>,
+    recorded_at: Instant,
+}
+
+/// How long a `SpawnOutcomes` entry survives if nothing ever consumes it
+/// (e.g. the run dir showed up after all, racing the reaper, so
+/// `wait_for_run_dir_at` never needed it) — a simple sweep-on-insert, not a
+/// background timer, is enough: this is a small backstop against an
+/// unbounded map, not a correctness-critical TTL.
+const SPAWN_OUTCOME_TTL: Duration = Duration::from_secs(60);
+
+/// Pre-journal spawn diagnostics (fix round 2's point fix B), keyed by
+/// `run_id`: `pult_bin::spawn_run`'s reaper records `(exit_code,
+/// stderr_tail)` here the moment a freshly-spawned child exits, and
+/// `wait_for_run_dir_at` probes it while waiting for the run directory to
+/// appear — so a spawn that fails before pult ever gets to create its
+/// journal (a bad command id, a bad flag, a too-old binary that chokes on
+/// `--run-id`) surfaces pult's *real* stderr and exit code instead of the
+/// generic "never journaled" fallback text, and does so within a couple
+/// hundred milliseconds rather than sitting out the full 5s ceiling.
+/// Distinct entries never collide across concurrent runs since `run_id` is
+/// unique per invocation (same key space as `TailRegistry`).
 #[derive(Clone, Default)]
-pub struct TailRegistry(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+pub struct SpawnOutcomes(Arc<Mutex<HashMap<String, SpawnOutcomeEntry>>>);
+
+impl SpawnOutcomes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a freshly-reaped child's outcome, evicting anything stale
+    /// first (see `SPAWN_OUTCOME_TTL`).
+    pub fn record(&self, run_id: &str, exit_code: Option<i32>, stderr_tail: Vec<String>) {
+        let mut map = self.0.lock().unwrap();
+        sweep(&mut map);
+        map.insert(
+            run_id.to_string(),
+            SpawnOutcomeEntry {
+                exit_code,
+                stderr_tail,
+                recorded_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Look at `run_id`'s outcome without consuming it — used to decide
+    /// *whether* to abort the wait; the actual abort re-fetches via `take`
+    /// so the entry isn't left behind once it's been acted on.
+    fn peek(&self, run_id: &str) -> Option<SpawnOutcomeEntry> {
+        let mut map = self.0.lock().unwrap();
+        sweep(&mut map);
+        map.get(run_id).cloned()
+    }
+
+    /// Consume `run_id`'s outcome, if any — evicted the moment it's used
+    /// (fix round 2's "entries evicted on consumption").
+    fn take(&self, run_id: &str) -> Option<SpawnOutcomeEntry> {
+        let mut map = self.0.lock().unwrap();
+        sweep(&mut map);
+        map.remove(run_id)
+    }
+}
+
+fn sweep(map: &mut HashMap<String, SpawnOutcomeEntry>) {
+    map.retain(|_, entry| entry.recorded_at.elapsed() < SPAWN_OUTCOME_TTL);
+}
+
+/// One tail's claim on a `run_id`: its generation number and the flag its
+/// own follow-loop checks to know it's been superseded (see
+/// `TailRegistry::claim`).
+struct TailHandle {
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Registry of run ids currently being tailed, generation-fenced (fix round
+/// 2, closing the eject-remount backlog-loss gap): claiming an id that's
+/// already present doesn't no-op — it cancels the existing tail (sets its
+/// `cancel` flag) and hands out a fresh generation + cancel flag for a brand
+/// new tail from offset 0, so restarting a lost or orphaned tail (e.g. a
+/// device ejected and remounted while its run kept going — see
+/// `+page.svelte`'s `startTail`) always recovers the *full* backlog rather
+/// than silently picking up wherever the old, now-unwatched tail happened to
+/// leave off. See this module's top-level doc comment for the resulting net
+/// invariant.
+#[derive(Clone, Default)]
+pub struct TailRegistry(Arc<Mutex<HashMap<String, TailHandle>>>);
 
 impl TailRegistry {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Claim `run_id` for tailing; `true` if this call actually claimed it
-    /// (nobody else was already tailing it).
-    fn claim(&self, run_id: &str) -> bool {
-        self.0.lock().unwrap().insert(run_id.to_string())
+    /// Claim `run_id` for a fresh tail: if one's already registered, its
+    /// cancel flag is set (so its follow-loop stops without emitting a
+    /// terminal event — see `follow_events`/`tail_existing_run`) and the
+    /// generation bumps by one; an absent id starts at generation 1. Always
+    /// succeeds — there is no "already claimed, no-op" outcome anymore (that
+    /// was fine before generation-fencing existed, but is exactly the
+    /// eject-remount backlog-loss bug once it does). Returns the freshly
+    /// claimed generation and its cancel flag, both of which the caller must
+    /// thread through the new tail's entire lifetime.
+    fn claim(&self, run_id: &str) -> (u64, Arc<AtomicBool>) {
+        let mut map = self.0.lock().unwrap();
+        let generation = match map.get(run_id) {
+            Some(existing) => {
+                existing.cancel.store(true, Ordering::SeqCst);
+                existing.generation + 1
+            }
+            None => 1,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        map.insert(
+            run_id.to_string(),
+            TailHandle {
+                generation,
+                cancel: cancel.clone(),
+            },
+        );
+        (generation, cancel)
     }
 
-    fn release(&self, run_id: &str) {
-        self.0.lock().unwrap().remove(run_id);
+    /// Release `run_id`'s claim — but only if the registry still holds
+    /// exactly the generation this caller was given. An old, since-cancelled
+    /// tail finishing its own wind-down must never delete the entry a newer
+    /// tail installed in the meantime; only the current generation's own
+    /// release actually clears the slot.
+    fn release(&self, run_id: &str, generation: u64) {
+        let mut map = self.0.lock().unwrap();
+        if map.get(run_id).map(|h| h.generation) == Some(generation) {
+            map.remove(run_id);
+        }
     }
 }
 
 /// Start tailing `run_id`'s journal in `repo_path`, emitting mapped events
-/// on the `pult://run-output` channel as a background task. A no-op if
-/// `run_id` is already being tailed (see `TailRegistry`). Returns
-/// immediately; the tail's outcome only ever reaches the frontend through
-/// its terminal `Exit` emission.
+/// (each stamped with this tail's generation — see `RunEvent::stamp_tail_gen`)
+/// on the `pult://run-output` channel as a background task. **Always**
+/// (re)starts tailing from offset 0, even if `run_id` is already being
+/// tailed — see `TailRegistry::claim`'s doc comment for why that's the fix
+/// round 2 behavior change from "claiming an already-tailed id is a no-op":
+/// callers that only want to avoid double-tailing a run their own frontend
+/// state is already handling must check that themselves before calling this
+/// (see `+page.svelte`'s `startTail`/`maybeLazyTail`) — this function's job
+/// is just "make the current-generation tail for `run_id` exist," not "was
+/// someone already watching."
+///
+/// The claim (and its immediate `TailStart` emission) happens synchronously,
+/// before any background work is spawned: a caller that calls this twice in
+/// a row gets the *first* call's old tail cancelled and superseded
+/// deterministically, in call order, not whenever the blocking thread pool
+/// happens to schedule it. Returns immediately either way; the tail's
+/// outcome only ever reaches the frontend through its terminal `Exit`
+/// emission (or, if superseded before then, no terminal emission at all).
 ///
 /// Deliberately spawns via `tauri::async_runtime` rather than bare
 /// `tokio::spawn`/`tokio::task::spawn_blocking`: this function is itself
@@ -647,23 +1005,35 @@ impl TailRegistry {
 pub fn tail_run<R: tauri::Runtime>(
     app: AppHandle<R>,
     tails: TailRegistry,
+    outcomes: SpawnOutcomes,
     repo_path: String,
     run_id: String,
 ) {
-    if !tails.claim(&run_id) {
-        return;
-    }
+    let (generation, cancel) = tails.claim(&run_id);
+    let _ = app.emit(
+        "pult://run-output",
+        RunEvent::TailStart {
+            run_id: run_id.clone(),
+            tail_gen: generation,
+        },
+    );
     tauri::async_runtime::spawn(async move {
         let emit_app = app.clone();
         let blocking_repo_path = repo_path.clone();
         let blocking_run_id = run_id.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
-            tail_run_blocking(&blocking_repo_path, &blocking_run_id, |event| {
-                let _ = emit_app.emit("pult://run-output", event);
-            });
+            tail_run_blocking(
+                &blocking_repo_path,
+                &blocking_run_id,
+                &outcomes,
+                &cancel,
+                move |event| {
+                    let _ = emit_app.emit("pult://run-output", event.stamp_tail_gen(generation));
+                },
+            );
         })
         .await;
-        tails.release(&run_id);
+        tails.release(&run_id, generation);
     });
 }
 
@@ -822,6 +1192,49 @@ mod tests {
         );
     }
 
+    // --- stop_run's precheck (fix round 2, point fix C) ---------------------
+    //
+    // `is_stoppable` is the pure decision `stop_run` bails out on *before*
+    // ever calling `signal_group` — by the source's own control flow,
+    // `signal_group` is unreachable whenever this returns `false` (the `if
+    // !is_stoppable(&meta) { return Err(...) }` guard is strictly before
+    // it), so these three cases alone establish "never signals" for the
+    // scenarios stop_run's own doc comment calls out (a terminal status, and
+    // a `Running` status whose writer is actually dead — the stale-pgid
+    // case this fix closes). Testing the pure predicate directly avoids
+    // `stop_run` itself needing a real `PULT_STATE_DIR`/filesystem/async
+    // runtime for what's fundamentally a synchronous decision over a
+    // `RunMeta` already in hand — a case picked up again in
+    // `real_pult_e2e` below, which touches `stop_run` itself against a real,
+    // already-finished journaled run. Revert-check: removing the
+    // `is_stoppable` guard from `stop_run` (calling `signal_group`
+    // unconditionally) doesn't change these three tests' outcomes since
+    // they test the predicate in isolation — the revert-check that actually
+    // matters is the e2e assertion below, which goes red without the guard
+    // (stop_run would return `Ok(())` for an already-finished run instead of
+    // the finished error).
+    #[test]
+    fn is_stoppable_is_false_for_a_terminal_status() {
+        assert!(!is_stoppable(&sample_meta("r1", Status::Exited)));
+        assert!(!is_stoppable(&sample_meta("r1", Status::Stopped)));
+    }
+
+    #[test]
+    fn is_stoppable_is_false_for_a_running_status_with_a_dead_writer() {
+        // The exact stale-pgid scenario this fix closes: `meta.json` still
+        // says `Running` (the writer never got to record otherwise — a
+        // crash), so without this precheck `stop_run` would happily signal
+        // a pgid the OS may have long since recycled for something else.
+        let mut meta = sample_meta("r1", Status::Running);
+        meta.pid = DEAD_PID;
+        assert!(!is_stoppable(&meta));
+    }
+
+    #[test]
+    fn is_stoppable_is_true_for_a_running_status_with_a_live_writer() {
+        assert!(is_stoppable(&sample_meta("r1", Status::Running))); // pid: this test process, alive
+    }
+
     #[test]
     fn list_runs_in_sorts_newest_first_and_skips_unreadable_dirs() {
         let state = tempfile::tempdir().unwrap();
@@ -970,6 +1383,59 @@ mod tests {
         assert!(matches!(&events2[0], RunEvent::Line { text, .. } if text == "torn-now-complete"));
     }
 
+    #[test]
+    fn drain_events_rewinds_a_torn_final_line_ending_mid_multibyte_instead_of_erroring() {
+        // Fix round 2's point fix D: `read_line`'s UTF-8 validation used to
+        // make a torn read that happens to split a multibyte character
+        // return an error immediately, killing the tail outright instead of
+        // rewinding like every other kind of torn line.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        append_line(
+            &path,
+            r#"{"ts":1,"kind":"line","stream":"stdout","text":"whole"}"#,
+        );
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut offset = 0u64;
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // A line torn mid-multibyte: a valid JSON prefix followed by
+            // just the *first* byte of "é" (0xC3 0xA9 in UTF-8) — the second
+            // byte, the closing quote/brace, and the newline haven't been
+            // written yet, exactly the shape a crash mid-append of
+            // non-ASCII text produces.
+            f.write_all(br#"{"ts":2,"kind":"line","stream":"stdout","text":""#)
+                .unwrap();
+            f.write_all(&[0xC3]).unwrap();
+        }
+        let events = drain_events(&mut file, &mut offset, "r1").unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "the torn multibyte line must not be read yet, and must not error: {events:?}"
+        );
+        assert!(matches!(&events[0], RunEvent::Line { text, .. } if text == "whole"));
+
+        // Completing it (second byte + close + newline) must be picked up
+        // whole on the next pass, not error, not double-read.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&[0xA9]).unwrap();
+            writeln!(f, r#""}}"#).unwrap();
+        }
+        let events2 = drain_events(&mut file, &mut offset, "r1").unwrap();
+        assert_eq!(events2.len(), 1);
+        assert!(matches!(&events2[0], RunEvent::Line { text, .. } if text == "é"));
+    }
+
     /// Mirrors pult's own deterministic race test (`tui`'s
     /// `src/runs.rs::follow_events_drains_once_more_after_observing_terminal_state`):
     /// the writer's `finish` appends the `exit` event *then* flips meta to a
@@ -1011,6 +1477,7 @@ mod tests {
             |e| emitted.push(e),
             observe,
             || panic!("must not sleep: the very first observe() already reports terminal"),
+            &AtomicBool::new(false),
         )
         .unwrap();
 
@@ -1056,11 +1523,53 @@ mod tests {
             |e| emitted.push(e),
             observe,
             || sleeps += 1,
+            &AtomicBool::new(false),
         )
         .unwrap();
 
         assert_eq!(sleeps, 2, "should sleep once per still-running observation");
         assert!(emitted.iter().any(|e| matches!(e, RunEvent::Exit { .. })));
+    }
+
+    #[test]
+    fn follow_events_stops_without_a_final_drain_delay_once_cancelled() {
+        // A cancelled follow must return promptly (checked between drain
+        // passes and right after `sleep()`) rather than waiting out however
+        // long the writer stays "running" — this is what lets a superseded
+        // tail wind down instead of lingering forever.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut offset = 0u64;
+        let mut emitted = Vec::new();
+        let running_meta = sample_meta("r1", Status::Running);
+        let cancel = AtomicBool::new(false);
+        let mut sleeps = 0;
+
+        follow_events(
+            &mut file,
+            &mut offset,
+            "r1",
+            |e| emitted.push(e),
+            move || Some(running_meta.clone()), // always still running: never terminal on its own
+            || {
+                sleeps += 1;
+                cancel.store(true, Ordering::SeqCst);
+            },
+            &cancel,
+        )
+        .unwrap();
+
+        assert_eq!(
+            sleeps, 1,
+            "must stop right after the sleep that saw cancel flip"
+        );
+        assert!(
+            emitted.is_empty(),
+            "a cancelled follow must not synthesize/observe a terminal event: {emitted:?}"
+        );
     }
 
     #[test]
@@ -1072,7 +1581,9 @@ mod tests {
         std::fs::write(dir.path().join("events.jsonl"), "").unwrap();
 
         let mut emitted = Vec::new();
-        tail_existing_run(dir.path(), "crashed-run", |e| emitted.push(e));
+        tail_existing_run(dir.path(), "crashed-run", &AtomicBool::new(false), |e| {
+            emitted.push(e)
+        });
 
         match emitted.last() {
             Some(RunEvent::Exit {
@@ -1108,7 +1619,9 @@ mod tests {
         .unwrap();
 
         let mut emitted = Vec::new();
-        tail_existing_run(dir.path(), "finished-run", |e| emitted.push(e));
+        tail_existing_run(dir.path(), "finished-run", &AtomicBool::new(false), |e| {
+            emitted.push(e)
+        });
 
         // Backlog replays first, in file order.
         assert!(matches!(&emitted[0], RunEvent::Line { text, .. } if text == "a"));
@@ -1141,7 +1654,9 @@ mod tests {
         std::fs::write(dir.path().join("events.jsonl"), "").unwrap();
 
         let mut emitted = Vec::new();
-        tail_existing_run(dir.path(), "no-exit-line", |e| emitted.push(e));
+        tail_existing_run(dir.path(), "no-exit-line", &AtomicBool::new(false), |e| {
+            emitted.push(e)
+        });
 
         match emitted.last() {
             Some(RunEvent::Exit {
@@ -1155,6 +1670,49 @@ mod tests {
     }
 
     #[test]
+    fn tail_existing_run_never_emits_a_synthesized_exit_once_cancelled() {
+        // A still-running writer whose tail gets cancelled mid-follow must
+        // wind down silently — the replacement tail that cancelled it owns
+        // this run_id's terminal emission now, not this one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = sample_meta("cancelled-run", Status::Running);
+        meta.pid = std::process::id(); // alive, so the follow loop actually polls
+        write_meta(dir.path(), &meta);
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            "{\"ts\":1,\"kind\":\"line\",\"stream\":\"stdout\",\"text\":\"a\"}\n",
+        )
+        .unwrap();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_thread = cancel.clone();
+        let dir_path = dir.path().to_path_buf();
+        let emitted: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let emitted_for_thread = emitted.clone();
+        let thread = std::thread::spawn(move || {
+            tail_existing_run(&dir_path, "cancelled-run", &cancel_for_thread, |e| {
+                emitted_for_thread.lock().unwrap().push(e)
+            });
+        });
+
+        // Let it replay the one backlog line and settle into its poll loop,
+        // then cancel it — it must return without ever emitting an Exit.
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.store(true, Ordering::SeqCst);
+        thread.join().unwrap();
+
+        let emitted = emitted.lock().unwrap();
+        assert!(
+            emitted.iter().any(|e| matches!(e, RunEvent::Line { .. })),
+            "the backlog line before cancellation must still have been emitted: {emitted:?}"
+        );
+        assert!(
+            !emitted.iter().any(|e| matches!(e, RunEvent::Exit { .. })),
+            "a cancelled tail must never emit its synthesized exit: {emitted:?}"
+        );
+    }
+
+    #[test]
     fn wait_for_run_dir_at_times_out_when_nothing_ever_appears() {
         let state = tempfile::tempdir().unwrap();
         let repo = tempfile::tempdir().unwrap();
@@ -1164,8 +1722,10 @@ mod tests {
             "never-appears",
             Duration::from_millis(30),
             Duration::from_millis(5),
+            &SpawnOutcomes::new(),
+            &AtomicBool::new(false),
         );
-        assert!(result.is_none());
+        assert!(matches!(result, WaitForRunDir::NeverJournaled));
     }
 
     #[test]
@@ -1189,9 +1749,56 @@ mod tests {
             "appears-late",
             Duration::from_secs(2),
             Duration::from_millis(5),
+            &SpawnOutcomes::new(),
+            &AtomicBool::new(false),
         );
         writer.join().unwrap();
-        assert_eq!(result, Some(run_dir));
+        match result {
+            WaitForRunDir::Found(dir) => assert_eq!(dir, run_dir),
+            other => panic!("expected the run dir to be found, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_for_run_dir_at_aborts_early_on_a_recorded_spawn_failure() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let outcomes = SpawnOutcomes::new();
+        outcomes.record(
+            "failed-run",
+            Some(2),
+            vec!["error: unrecognized subcommand 'bogus'".to_string()],
+        );
+
+        let start = Instant::now();
+        let result = wait_for_run_dir_at(
+            state.path(),
+            &repo_path,
+            "failed-run",
+            Duration::from_secs(5),
+            Duration::from_millis(20),
+            &outcomes,
+            &AtomicBool::new(false),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "must abort well before the 5s ceiling once a spawn failure is recorded: {elapsed:?}"
+        );
+        match result {
+            WaitForRunDir::SpawnFailed {
+                exit_code: Some(2),
+                stderr_tail,
+            } => {
+                assert_eq!(stderr_tail, vec!["error: unrecognized subcommand 'bogus'"]);
+            }
+            other => {
+                panic!("expected a captured spawn failure, got a different outcome: {other:?}")
+            }
+        }
     }
 
     #[test]
@@ -1205,6 +1812,8 @@ mod tests {
             "ghost-run",
             Duration::from_millis(30),
             Duration::from_millis(5),
+            &SpawnOutcomes::new(),
+            &AtomicBool::new(false),
             |e| emitted.push(e),
         );
 
@@ -1259,6 +1868,8 @@ mod tests {
             "delayed-run",
             Duration::from_secs(2),
             Duration::from_millis(5),
+            &SpawnOutcomes::new(),
+            &AtomicBool::new(false),
             |e| emitted.push(e),
         );
         writer.join().unwrap();
@@ -1275,17 +1886,39 @@ mod tests {
     }
 
     #[test]
-    fn tail_registry_claim_is_a_no_op_the_second_time() {
+    fn tail_registry_claim_bumps_generation_and_cancels_the_previous_handle() {
         let tails = TailRegistry::new();
-        assert!(tails.claim("r1"), "first claim should succeed");
-        assert!(
-            !tails.claim("r1"),
-            "a run already being tailed must not be claimed twice"
+
+        let (gen1, cancel1) = tails.claim("r1");
+        assert_eq!(gen1, 1, "an absent id starts at generation 1");
+        assert!(!cancel1.load(Ordering::SeqCst));
+
+        let (gen2, cancel2) = tails.claim("r1");
+        assert_eq!(
+            gen2, 2,
+            "claiming an already-tailed id must bump the generation, not no-op"
         );
-        tails.release("r1");
         assert!(
-            tails.claim("r1"),
-            "after release, the run id can be claimed again"
+            cancel1.load(Ordering::SeqCst),
+            "the superseded handle's cancel flag must be set"
+        );
+        assert!(!cancel2.load(Ordering::SeqCst));
+
+        // A stale release (an old, already-cancelled tail winding down) must
+        // not evict the entry a newer generation installed.
+        tails.release("r1", gen1);
+        let (gen3, _cancel3) = tails.claim("r1");
+        assert_eq!(
+            gen3, 3,
+            "a stale release must not have cleared the registry entry"
+        );
+
+        // Only the CURRENT generation's own release actually clears the slot.
+        tails.release("r1", gen3);
+        let (gen4, _cancel4) = tails.claim("r1");
+        assert_eq!(
+            gen4, 1,
+            "after the current generation's release, the id is absent again and restarts at 1"
         );
     }
 
@@ -1313,6 +1946,7 @@ mod tests {
         let app = tauri::test::mock_app();
         let handle = app.handle().clone();
         let tails = TailRegistry::new();
+        let outcomes = SpawnOutcomes::new();
 
         let joined = std::thread::spawn(move || {
             // No `#[tokio::test]`, no `Runtime::new().block_on(...)` — this
@@ -1321,6 +1955,7 @@ mod tests {
             tail_run(
                 handle,
                 tails,
+                outcomes,
                 "/some/never-opened/repo".to_string(),
                 "no-runtime-thread".to_string(),
             );
@@ -1331,6 +1966,180 @@ mod tests {
             joined.is_ok(),
             "tail_run must not panic when called from a thread with no ambient Tokio runtime"
         );
+    }
+
+    /// Test-only mirror of `tail_run`'s claim → `TailStart` → blocking-tail →
+    /// release sequence, minus the Tauri/async plumbing: everything the real
+    /// `tail_run` does beyond that sequence is synchronous std I/O (see
+    /// `tail_run_blocking`'s doc comment), so this is directly callable from
+    /// a plain `std::thread` — exactly how the real blocking-pool thread
+    /// executes it — with an explicit state dir and a plain emit callback.
+    /// Used by the restart/cancellation test below to drive two concurrent
+    /// tails of the same run_id without needing any Tauri machinery at all.
+    #[allow(clippy::too_many_arguments)]
+    fn tail_run_sync_at(
+        state: &Path,
+        repo_path: &str,
+        run_id: &str,
+        registry: &TailRegistry,
+        outcomes: &SpawnOutcomes,
+        timeout: Duration,
+        poll: Duration,
+        mut emit: impl FnMut(RunEvent),
+    ) {
+        let (generation, cancel) = registry.claim(run_id);
+        emit(RunEvent::TailStart {
+            run_id: run_id.to_string(),
+            tail_gen: generation,
+        });
+        tail_run_blocking_at(
+            state,
+            repo_path,
+            run_id,
+            timeout,
+            poll,
+            outcomes,
+            &cancel,
+            |event| emit(event.stamp_tail_gen(generation)),
+        );
+        registry.release(run_id, generation);
+    }
+
+    #[test]
+    fn restarting_a_tail_cancels_the_old_one_and_replays_from_offset_0_with_bumped_generation() {
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path().to_string_lossy().to_string();
+        let root = runs_root_at(state.path(), &repo_path);
+        let run_dir = root.join("restart-run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let mut meta = sample_meta("restart-run", Status::Running);
+        meta.pid = std::process::id(); // alive for the whole test
+        write_meta(&run_dir, &meta);
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"ts\":1,\"kind\":\"line\",\"stream\":\"stdout\",\"text\":\"a\"}\n\
+             {\"ts\":2,\"kind\":\"line\",\"stream\":\"stdout\",\"text\":\"b\"}\n",
+        )
+        .unwrap();
+
+        let registry = TailRegistry::new();
+        let outcomes = SpawnOutcomes::new();
+
+        let first_events: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let first_events2 = first_events.clone();
+        let registry1 = registry.clone();
+        let outcomes1 = outcomes.clone();
+        let state1 = state.path().to_path_buf();
+        let repo_path1 = repo_path.clone();
+        let first_thread = std::thread::spawn(move || {
+            tail_run_sync_at(
+                &state1,
+                &repo_path1,
+                "restart-run",
+                &registry1,
+                &outcomes1,
+                Duration::from_secs(2),
+                Duration::from_millis(20),
+                move |e| first_events2.lock().unwrap().push(e),
+            );
+        });
+
+        // Let the first tail claim generation 1, emit its leading
+        // `TailStart`, and replay the two-line backlog before restarting.
+        std::thread::sleep(Duration::from_millis(150));
+        {
+            let events = first_events.lock().unwrap();
+            assert!(
+                matches!(
+                    events.first(),
+                    Some(RunEvent::TailStart { tail_gen: 1, .. })
+                ),
+                "the first tail must lead with generation 1: {events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e, RunEvent::Line { .. }))
+                    .count(),
+                2,
+                "the first tail must have replayed the full backlog by now: {events:?}"
+            );
+        }
+
+        // Restart: a second tail_run for the same run_id must cancel the
+        // first and replay from offset 0 with a bumped generation.
+        let second_events: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let second_events2 = second_events.clone();
+        let registry2 = registry.clone();
+        let outcomes2 = outcomes.clone();
+        let state2 = state.path().to_path_buf();
+        let repo_path2 = repo_path.clone();
+        let second_thread = std::thread::spawn(move || {
+            tail_run_sync_at(
+                &state2,
+                &repo_path2,
+                "restart-run",
+                &registry2,
+                &outcomes2,
+                Duration::from_secs(2),
+                Duration::from_millis(20),
+                move |e| second_events2.lock().unwrap().push(e),
+            );
+        });
+
+        // Give the first tail time to notice its cancel flag (checked every
+        // FOLLOW_POLL cycle) and the second tail time to replay the backlog
+        // and settle into its own follow-loop wait.
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Finish the run for real, so both threads actually terminate: the
+        // second (current) tail should pick this up and emit the journaled
+        // Exit.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(run_dir.join("events.jsonl"))
+                .unwrap();
+            writeln!(f, r#"{{"ts":3,"kind":"exit","code":0,"stopped":false}}"#).unwrap();
+        }
+        let mut exited = meta.clone();
+        exited.status = Status::Exited;
+        exited.exit_code = Some(0);
+        write_meta(&run_dir, &exited);
+
+        first_thread.join().unwrap();
+        second_thread.join().unwrap();
+
+        let first = first_events.lock().unwrap().clone();
+        let second = second_events.lock().unwrap().clone();
+
+        assert!(
+            !first.iter().any(|e| matches!(e, RunEvent::Exit { .. })),
+            "a cancelled tail must never emit its synthesized exit: {first:?}"
+        );
+        assert!(
+            matches!(
+                second.first(),
+                Some(RunEvent::TailStart { tail_gen: 2, .. })
+            ),
+            "the restart must lead with a bumped generation: {second:?}"
+        );
+        assert_eq!(
+            second
+                .iter()
+                .filter(|e| matches!(e, RunEvent::Line { .. }))
+                .count(),
+            2,
+            "the restart must replay the full backlog from offset 0: {second:?}"
+        );
+        match second.last() {
+            Some(RunEvent::Exit { code: Some(0), .. }) => {}
+            other => {
+                panic!("expected the current-generation tail to emit the real Exit, got: {other:?}")
+            }
+        }
     }
 
     // --- End-to-end against the real pult binary ---------------------------
@@ -1416,6 +2225,9 @@ mod tests {
             }
             trust_fixture(&bin, trust_store.path()).await;
 
+            let outcomes = SpawnOutcomes::new();
+            let no_cancel = AtomicBool::new(false);
+
             // --- 1. backlog replay + journaled Exit mapping, via `pipeline` ---
             // (steps + progress + status + two stdout lines + a clean exit —
             // exercises every mapped event kind in one finished run.)
@@ -1425,21 +2237,28 @@ mod tests {
                 "pipeline",
                 &HashMap::new(),
                 "e2e-pipeline",
+                &outcomes,
             )
             .await
             .expect("spawn_run should succeed");
 
-            let run_dir = wait_for_run_dir_at(
+            let run_dir = match wait_for_run_dir_at(
                 state.path(),
                 &repo_path,
                 "e2e-pipeline",
                 Duration::from_secs(5),
                 Duration::from_millis(50),
-            )
-            .expect("pult should journal the pipeline run promptly");
+                &outcomes,
+                &no_cancel,
+            ) {
+                WaitForRunDir::Found(dir) => dir,
+                other => panic!("pult should journal the pipeline run promptly, got: {other:?}"),
+            };
 
             let mut pipeline_events = Vec::new();
-            tail_existing_run(&run_dir, "e2e-pipeline", |e| pipeline_events.push(e));
+            tail_existing_run(&run_dir, "e2e-pipeline", &no_cancel, |e| {
+                pipeline_events.push(e)
+            });
 
             eprintln!("\n--- backlog replay order (pipeline) ---");
             for e in &pipeline_events {
@@ -1510,25 +2329,53 @@ mod tests {
                 other => panic!("expected a clean journaled Exit, got: {other:?}"),
             }
 
+            // --- 1b. stop_run's precheck (fix round 2, point fix C): the
+            // pipeline run above already finished (Status::Exited) — calling
+            // stop_run on it now must return the finished error, not
+            // silently signal an unrelated, possibly-recycled pgid. (Can
+            // only assert on the returned `Err` here, not on "nothing got
+            // signaled" — `signal_group` is best-effort and swallows ESRCH,
+            // so a stray signal to a process group that no longer exists
+            // wouldn't be observable from here either way; see
+            // `is_stoppable`'s unit tests above for the isolated precheck
+            // logic this exercises end to end.)
+            let stop_on_finished = stop_run(&repo_path, "e2e-pipeline").await;
+            assert_eq!(
+                stop_on_finished.unwrap_err(),
+                RUN_ALREADY_FINISHED,
+                "stop_run on an already-finished run must return the finished error"
+            );
+
             // --- 2. live-follow of a still-running command, then stop it ---
-            crate::pult_bin::spawn_run(&bin, &repo_path, "sleep-loop", &HashMap::new(), "e2e-stop")
-                .await
-                .expect("spawn_run should succeed");
-            let stop_run_dir = wait_for_run_dir_at(
+            crate::pult_bin::spawn_run(
+                &bin,
+                &repo_path,
+                "sleep-loop",
+                &HashMap::new(),
+                "e2e-stop",
+                &outcomes,
+            )
+            .await
+            .expect("spawn_run should succeed");
+            let stop_run_dir = match wait_for_run_dir_at(
                 state.path(),
                 &repo_path,
                 "e2e-stop",
                 Duration::from_secs(5),
                 Duration::from_millis(50),
-            )
-            .expect("pult should journal the sleep-loop run promptly");
+                &outcomes,
+                &no_cancel,
+            ) {
+                WaitForRunDir::Found(dir) => dir,
+                other => panic!("pult should journal the sleep-loop run promptly, got: {other:?}"),
+            };
 
             let events_for_thread: std::sync::Arc<std::sync::Mutex<Vec<RunEvent>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let events_for_thread2 = events_for_thread.clone();
             let stop_run_dir2 = stop_run_dir.clone();
             let tail_thread = std::thread::spawn(move || {
-                tail_existing_run(&stop_run_dir2, "e2e-stop", |e| {
+                tail_existing_run(&stop_run_dir2, "e2e-stop", &AtomicBool::new(false), |e| {
                     events_for_thread2.lock().unwrap().push(e)
                 });
             });
@@ -1567,17 +2414,22 @@ mod tests {
                 "sleep-loop",
                 &HashMap::new(),
                 "e2e-crash",
+                &outcomes,
             )
             .await
             .expect("spawn_run should succeed");
-            let crash_run_dir = wait_for_run_dir_at(
+            let crash_run_dir = match wait_for_run_dir_at(
                 state.path(),
                 &repo_path,
                 "e2e-crash",
                 Duration::from_secs(5),
                 Duration::from_millis(50),
-            )
-            .expect("pult should journal the sleep-loop run promptly");
+                &outcomes,
+                &no_cancel,
+            ) {
+                WaitForRunDir::Found(dir) => dir,
+                other => panic!("pult should journal the sleep-loop run promptly, got: {other:?}"),
+            };
             let crash_meta = read_meta(&crash_run_dir).expect("meta.json should be readable");
             let pgid = crash_meta.pgid.expect("meta should record a pgid on unix");
 
@@ -1601,6 +2453,241 @@ mod tests {
                 .find(|r| r.run_id == "e2e-crash")
                 .expect("crashed run should be listed");
             assert_eq!(crashed.status, "crashed");
+
+            // --- 4. pre-journal spawn-failure capture (fix round 2, point
+            // fix B): spawning an unrecognized command id is a clap-level
+            // parse error — pult never gets far enough to create a run
+            // directory at all (confirmed by hand against this exact
+            // binary/fixture: `pult nonexistent-command-xyz --run-id … `
+            // exits 2 with "error: unrecognized subcommand …" on stderr,
+            // nothing on stdout, no run dir). Proves the reaper's captured
+            // real stderr/exit code reach the tail path — instead of
+            // `emit_never_journaled`'s generic text — well under the 5s
+            // ceiling. Kept in this same env-scoped test rather than a
+            // second `#[tokio::test]`, since `PULT_STATE_DIR` must be set as
+            // a real process env var for the *spawned pult child* to read
+            // (inherited, not passed explicitly), and this file's own
+            // convention (see this module's header comment) is that only
+            // one test here ever touches that process-global var, to stay
+            // race-free under Rust's default parallel test execution.
+            let spawn_failure_outcomes = SpawnOutcomes::new();
+            let start = Instant::now();
+            crate::pult_bin::spawn_run(
+                &bin,
+                &repo_path,
+                "nonexistent-command-xyz",
+                &HashMap::new(),
+                "e2e-spawn-failure",
+                &spawn_failure_outcomes,
+            )
+            .await
+            .expect("spawn_run itself should still succeed — pult started, it just errored fast");
+
+            // `tail_run_blocking_at` is deliberately synchronous (see its own
+            // doc comment) — real callers always run it on a genuinely
+            // separate OS thread (`tauri::async_runtime::spawn_blocking` in
+            // production). This test's `#[tokio::test]` runtime is
+            // single-threaded by default, so calling it directly here (on
+            // the same task as `spawn_run`'s `tokio::spawn`ed reaper) would
+            // starve that reaper of any chance to ever run — routed through
+            // `tokio::task::spawn_blocking` instead, mirroring production's
+            // execution shape exactly (own thread, awaited without blocking
+            // the runtime).
+            let state_for_wait = state.path().to_path_buf();
+            let repo_path_for_wait = repo_path.clone();
+            let outcomes_for_wait = spawn_failure_outcomes.clone();
+            let spawn_failure_events = tokio::task::spawn_blocking(move || {
+                let mut events = Vec::new();
+                tail_run_blocking_at(
+                    &state_for_wait,
+                    &repo_path_for_wait,
+                    "e2e-spawn-failure",
+                    Duration::from_secs(5),
+                    Duration::from_millis(50),
+                    &outcomes_for_wait,
+                    &AtomicBool::new(false),
+                    |e| events.push(e),
+                );
+                events
+            })
+            .await
+            .expect("blocking tail task should not panic");
+            let elapsed = start.elapsed();
+
+            eprintln!("\n--- pre-journal spawn-failure capture (elapsed {elapsed:?}) ---");
+            for e in &spawn_failure_events {
+                eprintln!("{e:?}");
+            }
+
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "must short-circuit well under the 5s ceiling once the child's death \
+                 is observed, not sit out the full wait: {elapsed:?}"
+            );
+
+            let captured_stderr: String = spawn_failure_events
+                .iter()
+                .filter_map(|e| match e {
+                    RunEvent::Line { stream, text, .. } if stream == "stderr" => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                captured_stderr.contains("unrecognized subcommand"),
+                "should surface pult's real stderr, not the generic never-journaled \
+                 text: {captured_stderr:?}"
+            );
+
+            match spawn_failure_events.last() {
+                Some(RunEvent::Exit {
+                    code: Some(2),
+                    stopped: false,
+                    crashed: false,
+                    ..
+                }) => {}
+                other => panic!("expected pult's real exit code (2), got: {other:?}"),
+            }
+
+            // --- 6. real-journal restart e2e (fix round 2, point fix A):
+            // tail a still-running slow run, then call the generation-fenced
+            // tail entry point again for the SAME run_id mid-run — the
+            // second tail must replay the FULL backlog (the real line pult
+            // already journaled before the restart, not just whatever
+            // arrives afterward), and the superseded first tail must never
+            // emit a synthesized exit. This is the actual eject-remount
+            // recovery scenario (`+page.svelte`'s `startTail` after
+            // `handleEjectDevice` then a remount), proven here against a
+            // real journaled run rather than a hand-written fixture
+            // `meta.json`.
+            let registry = TailRegistry::new();
+            crate::pult_bin::spawn_run(
+                &bin,
+                &repo_path,
+                "slow-drip",
+                &HashMap::new(),
+                "e2e-restart",
+                &outcomes,
+            )
+            .await
+            .expect("spawn_run should succeed");
+
+            match wait_for_run_dir_at(
+                state.path(),
+                &repo_path,
+                "e2e-restart",
+                Duration::from_secs(5),
+                Duration::from_millis(50),
+                &outcomes,
+                &no_cancel,
+            ) {
+                WaitForRunDir::Found(_) => {}
+                other => panic!("pult should journal the slow-drip run promptly, got: {other:?}"),
+            }
+
+            let first_events: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+            let first_events2 = first_events.clone();
+            let registry1 = registry.clone();
+            let outcomes1 = outcomes.clone();
+            let state1 = state.path().to_path_buf();
+            let repo_path1 = repo_path.clone();
+            let first_thread = std::thread::spawn(move || {
+                tail_run_sync_at(
+                    &state1,
+                    &repo_path1,
+                    "e2e-restart",
+                    &registry1,
+                    &outcomes1,
+                    Duration::from_secs(5),
+                    Duration::from_millis(50),
+                    move |e| first_events2.lock().unwrap().push(e),
+                );
+            });
+
+            // Give the first tail time to replay the one backlog line and
+            // settle into its live-follow poll — `slow-drip` loops forever
+            // until stopped, so it's still genuinely running at this point.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            {
+                let events = first_events.lock().unwrap();
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, RunEvent::Line { text, .. } if text == "first drop")),
+                    "the first tail should have replayed the backlog line by now: {events:?}"
+                );
+            }
+
+            // Restart mid-run.
+            let second_events: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+            let second_events2 = second_events.clone();
+            let registry2 = registry.clone();
+            let outcomes2 = outcomes.clone();
+            let state2 = state.path().to_path_buf();
+            let repo_path2 = repo_path.clone();
+            let second_thread = std::thread::spawn(move || {
+                tail_run_sync_at(
+                    &state2,
+                    &repo_path2,
+                    "e2e-restart",
+                    &registry2,
+                    &outcomes2,
+                    Duration::from_secs(5),
+                    Duration::from_millis(50),
+                    move |e| second_events2.lock().unwrap().push(e),
+                );
+            });
+
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            {
+                let events = second_events.lock().unwrap();
+                assert!(
+                    matches!(
+                        events.first(),
+                        Some(RunEvent::TailStart { tail_gen: 2, .. })
+                    ),
+                    "the restart must lead with a bumped generation: {events:?}"
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, RunEvent::Line { text, .. } if text == "first drop")),
+                    "the restart must replay the FULL backlog from offset 0 (this is the \
+                     eject-remount recovery this fix enables), not just whatever arrives \
+                     after the restart: {events:?}"
+                );
+            }
+
+            // Stop it so both threads actually terminate (slow-drip would
+            // otherwise loop forever) — the second (current) tail should
+            // observe the stop.
+            stop_run(&repo_path, "e2e-restart")
+                .await
+                .expect("stop_run should succeed");
+            first_thread
+                .join()
+                .expect("first tail thread should not panic");
+            second_thread
+                .join()
+                .expect("second tail thread should not panic");
+
+            let first = first_events.lock().unwrap().clone();
+            let second = second_events.lock().unwrap().clone();
+            eprintln!("\n--- real-journal restart mid-run (eject-remount recovery) ---");
+            eprintln!("first tail:  {first:?}");
+            eprintln!("second tail: {second:?}");
+            assert!(
+                !first.iter().any(|e| matches!(e, RunEvent::Exit { .. })),
+                "the superseded first tail must never emit a synthesized exit: {first:?}"
+            );
+            match second.last() {
+                Some(RunEvent::Exit { stopped: true, .. }) => {}
+                other => panic!(
+                    "expected the current-generation tail to observe the stop, got: {other:?}"
+                ),
+            }
 
             unsafe {
                 std::env::remove_var("PULT_STATE_DIR");

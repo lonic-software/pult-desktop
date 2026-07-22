@@ -26,6 +26,10 @@ pub fn run() {
         // poll can never double-tail the same run — see
         // `journal::TailRegistry`.
         .manage(journal::TailRegistry::new())
+        // Pre-journal spawn-failure diagnostics (fix round 2's point fix
+        // B), fed by `pult_bin::spawn_run`'s reaper and probed by
+        // `journal::wait_for_run_dir_at` — see `journal::SpawnOutcomes`.
+        .manage(journal::SpawnOutcomes::new())
         .invoke_handler(tauri::generate_handler![
             commands::open_repo,
             commands::trust_repo,

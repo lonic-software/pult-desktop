@@ -19,7 +19,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::journal::SpawnOutcomes;
 use crate::types::Listing;
+
+/// Cap on the stderr `spawn_run`'s reaper buffers per run, keeping the
+/// *tail* on overflow (fix round 2's point fix B) — a usage error or panic
+/// is almost always the last thing pult wrote before dying, not the first.
+const SPAWN_STDERR_CAP: usize = 8 * 1024;
 
 const SETTINGS_STORE: &str = "settings.json";
 const PULT_PATH_KEY: &str = "pultPath";
@@ -436,14 +442,19 @@ async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String>
 /// This only reports a *spawn-level* failure (binary missing, exec failed).
 /// Whether pult then actually journals the run (a too-old binary might not
 /// understand `--run-id` at all, or there's a startup race before the run
-/// dir exists) is something only the journal tail can observe — see
-/// `crate::journal::tail_run`'s bounded wait for the run dir to appear.
+/// dir exists, or — fix round 2's point fix B — pult started but errored out
+/// before ever creating one, e.g. an unrecognized command id) is something
+/// only the journal tail can observe — see `crate::journal::tail_run`'s
+/// bounded wait for the run dir to appear, and `outcomes` below for how a
+/// *fast* failure gets its real diagnostics back to that wait instead of the
+/// generic "never journaled" fallback.
 pub async fn spawn_run(
     bin: &PathBuf,
     dir: &str,
     id: &str,
     values: &HashMap<String, String>,
     run_id: &str,
+    outcomes: &SpawnOutcomes,
 ) -> Result<(), String> {
     let payload = serde_json::to_string(values).map_err(|e| e.to_string())?;
 
@@ -470,7 +481,14 @@ pub async fn spawn_run(
         .env_remove("PULT_EVENTS")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Piped, not null (fix round 2's point fix B): pult's own usage/load
+        // errors (bad command id, bad flag, a manifest that fails to parse)
+        // go to *its* stderr, same as any well-behaved CLI — this is the
+        // only way this app ever sees them for a run that fails before
+        // journaling anything. stdout stays null; nothing here reads it
+        // (pult's own child's stdout is what gets journaled as `line`
+        // events, not pult's own stdout, which carries none of that).
+        .stderr(Stdio::piped());
 
     #[cfg(unix)]
     cmd.process_group(0);
@@ -484,13 +502,51 @@ pub async fn spawn_run(
         // dropped here: closes stdin so pult doesn't wait for more input
     }
 
+    let mut stderr = child.stderr.take().expect("stderr was piped above");
+
     // Reap in the background rather than awaiting here: `run_command`
     // returns as soon as the tail has started, not when the run finishes.
+    // Draining stderr concurrently with `wait()` (rather than after) avoids
+    // the classic deadlock: a chatty-enough usage error could otherwise fill
+    // the pipe buffer and block pult's own exit on someone reading it.
+    let outcomes = outcomes.clone();
+    let run_id = run_id.to_string();
     tokio::spawn(async move {
-        let _ = child.wait().await;
+        let stderr_tail = capture_stderr_tail(&mut stderr).await;
+        let status = child.wait().await;
+        let exit_code = status.ok().and_then(|s| s.code());
+        outcomes.record(&run_id, exit_code, stderr_tail);
     });
 
     Ok(())
+}
+
+/// Drain a child's stderr to EOF, returning its content as lines, bounded to
+/// [`SPAWN_STDERR_CAP`] bytes and keeping the tail on overflow (not the
+/// head) — see `SpawnOutcomes`'s doc comment for why the tail is what
+/// matters here. Reads in fixed-size chunks rather than line-by-line so a
+/// pathological single unterminated line can't grow the buffer unbounded
+/// before the cap ever gets a chance to trim it.
+async fn capture_stderr_tail(stderr: &mut tokio::process::ChildStderr) -> Vec<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() > SPAWN_STDERR_CAP {
+                    let excess = buf.len() - SPAWN_STDERR_CAP;
+                    buf.drain(0..excess);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
 }
 
 #[cfg(test)]
