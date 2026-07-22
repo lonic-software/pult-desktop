@@ -84,11 +84,17 @@ export interface DoctorReport {
 // generation number, and its very first emission is always `tail_start`,
 // carrying that generation as a required field. +page.svelte's shared
 // subscription router adopts a `tail_start`'s `tail_gen` as "the current
-// generation" for that run_id and drops any later event whose `tail_gen`
-// doesn't match (a straggler from a since-cancelled, superseded tail) — see
-// `shouldAcceptEvent` in `$lib/tailGen.ts`. Absent `tail_gen` (the mock
-// backend never sets it, and never emits `tail_start` at all) is accepted
-// unconditionally, same as a match: there's no generation to fence against.
+// generation" for that run_id (forward-only — see `adoptTailGen`) and drops
+// any later event whose `tail_gen` doesn't match (a straggler from a
+// since-cancelled, superseded tail) — see `shouldAcceptEvent` in
+// `$lib/tailGen.ts`. Absent `tail_gen` is accepted unconditionally, same as
+// a match: there's no generation to fence against — true of every event
+// `src/lib/mock/backend.ts`'s `runCommand` emits directly for a fresh
+// in-app run (no journal or tail stands in front of that path in the mock),
+// but NOT true of the mock's `tailRun` any more (fix round 3): it now emits
+// its own `tail_start` and stamps its own replayed events with a real,
+// per-run-id incrementing generation too, modeling the fence's observable
+// contract under VITE_MOCK.
 export type RunEvent =
   | { kind: "tail_start"; run_id: string; tail_gen: number }
   | {

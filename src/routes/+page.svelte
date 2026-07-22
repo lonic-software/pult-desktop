@@ -29,7 +29,7 @@
   } from "$lib/types";
   import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
   import { reconcileDecision } from "$lib/reconcile";
-  import { shouldAcceptEvent } from "$lib/tailGen";
+  import { adoptTailGen, shouldAcceptEvent } from "$lib/tailGen";
   import { formatDuration } from "$lib/time";
   import type { BoardMeterOverride } from "$lib/readiness";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
@@ -528,7 +528,16 @@
   // orphaned tail happened to leave off) — call this unconditionally.
   function startTail(path: string, commandId: string, runId: string) {
     const { applyEvent } = makeRunHandlers(path, commandId, runId);
-    activeTails.set(runId, { apply: applyEvent, gen: null });
+    // Fix round 3: preserve the existing entry's adopted gen across a
+    // re-registration, rather than resetting it to `null` — this call is a
+    // genuine backend restart (see the doc comment above), and the
+    // restarted tail's own `tail_start` will bump it forward on arrival
+    // (`adoptTailGen`, in the shared router below); resetting it to `null`
+    // here would reopen fix round 3's null-window (a stale, already-fenced
+    // straggler from the PREVIOUS generation could slip back in as
+    // "gen-less" territory for the brief moment before the new tail_start
+    // lands).
+    activeTails.set(runId, { apply: applyEvent, gen: activeTails.get(runId)?.gen ?? null });
     void tailRun(path, runId);
   }
 
@@ -946,22 +955,23 @@
   // active or mounted at all (a background device's tail keeps delivering
   // here even while its device sits inactive in the rack).
   //
-  // Fix round 2's generation fence: `tail_start` always adopts its own
-  // `tail_gen` as this run_id's current generation (before being applied,
-  // so its own in-band field-reset — see `applyEvent`'s `tail_start` case —
-  // runs against the freshly-adopted generation, though the two are
-  // independent). Every other event is gated through `shouldAcceptEvent`
-  // first: a `tail_gen` that doesn't match the adopted one is a straggler
-  // from a tail that's since been cancelled and superseded, and must never
-  // reach the record.
+  // Fix round 3's forward-only generation fence ($lib/tailGen.ts): every
+  // event, `tail_start` included, is first offered to `adoptTailGen` (a
+  // `tail_start` bumps the adopted generation only if its own `tail_gen` is
+  // strictly higher than what's already adopted — never a reset to
+  // whatever it happens to carry), and only THEN checked against
+  // `shouldAcceptEvent` before being applied. No inline special case for
+  // `tail_start` here — composing the two pure functions the same way for
+  // every event is what closes the null-window finding (a stale stamped
+  // event arriving before this run_id's own `tail_start` is dropped, not
+  // silently accepted because "nothing's adopted yet"); see tailGen.ts's
+  // module comment for the full matrix and the invariant that makes this
+  // ordering sound.
   const unsubscribeRunOutput = subscribeRunOutput((event) => {
     const entry = activeTails.get(event.run_id);
     if (!entry) return;
-    if (event.kind === "tail_start") {
-      entry.gen = event.tail_gen;
-    } else if (!shouldAcceptEvent(entry.gen, event.tail_gen)) {
-      return;
-    }
+    entry.gen = adoptTailGen(entry.gen, event);
+    if (!shouldAcceptEvent(entry.gen, event)) return;
     entry.apply(event);
     if (event.kind === "exit") activeTails.delete(event.run_id);
   });
