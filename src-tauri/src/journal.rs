@@ -620,19 +620,44 @@ impl TailRegistry {
 }
 
 /// Start tailing `run_id`'s journal in `repo_path`, emitting mapped events
-/// on the `pult://run-output` channel as a background tokio task. A no-op
-/// if `run_id` is already being tailed (see `TailRegistry`). Returns
+/// on the `pult://run-output` channel as a background task. A no-op if
+/// `run_id` is already being tailed (see `TailRegistry`). Returns
 /// immediately; the tail's outcome only ever reaches the frontend through
 /// its terminal `Exit` emission.
-pub fn tail_run(app: AppHandle, tails: TailRegistry, repo_path: String, run_id: String) {
+///
+/// Deliberately spawns via `tauri::async_runtime` rather than bare
+/// `tokio::spawn`/`tokio::task::spawn_blocking`: this function is itself
+/// synchronous (not `async fn`), and it's called from both an async command
+/// (`run_command`, already polled inside the Tokio runtime — an ambient
+/// reactor exists there) and a *sync* command (`tail_run`, which Tauri
+/// dispatches on a plain thread with no ambient Tokio runtime at all — bare
+/// `tokio::spawn` there panics with "there is no reactor running"). Tauri's
+/// async-runtime handle is a process-global singleton set up once at
+/// startup and usable from any thread, sync or async, so routing through it
+/// here — in the one primitive every caller goes through — means no call
+/// site, present or future, can get this wrong.
+///
+/// Generic over `R: tauri::Runtime` (rather than the `Wry`-defaulted
+/// `AppHandle` alias) purely so
+/// `tests::tail_run_does_not_panic_when_called_outside_any_tokio_runtime`
+/// below can drive this with `tauri::test::mock_app`'s
+/// `AppHandle<MockRuntime>` — every real call site still passes a plain
+/// `AppHandle` (`= AppHandle<Wry>`) and `R` is inferred as `Wry` there, so
+/// this is a no-op change for production behavior.
+pub fn tail_run<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    tails: TailRegistry,
+    repo_path: String,
+    run_id: String,
+) {
     if !tails.claim(&run_id) {
         return;
     }
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let emit_app = app.clone();
         let blocking_repo_path = repo_path.clone();
         let blocking_run_id = run_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        let _ = tauri::async_runtime::spawn_blocking(move || {
             tail_run_blocking(&blocking_repo_path, &blocking_run_id, |event| {
                 let _ = emit_app.emit("pult://run-output", event);
             });
@@ -1261,6 +1286,50 @@ mod tests {
         assert!(
             tails.claim("r1"),
             "after release, the run id can be claimed again"
+        );
+    }
+
+    /// Regression for a field crash: `tail_run` is called from *two* Tauri
+    /// command contexts — the async `run_command` (already polled inside
+    /// the Tokio runtime, so an ambient reactor exists) and the *sync*
+    /// `tail_run` command, which Tauri dispatches on a plain thread with no
+    /// ambient Tokio runtime at all. Bare `tokio::spawn`/
+    /// `tokio::task::spawn_blocking` there panicked immediately with
+    /// "there is no reactor running, must be called from the context of a
+    /// Tokio 1.x runtime" — switching repos in the real app (which tails
+    /// hydrated history via the sync command) crashed the whole process.
+    ///
+    /// `tauri::test::mock_app` (the `test` feature, dev-only — see
+    /// Cargo.toml) mints a real `AppHandle` without needing a window, so
+    /// this reproduces the actual failure mode directly: call `tail_run`
+    /// from a plain `std::thread` with no runtime anywhere in the picture,
+    /// same as the sync command's real dispatch context. Revert `tail_run`
+    /// to `tokio::spawn`/`tokio::task::spawn_blocking` and this goes red
+    /// (the spawned thread panics); the `tauri::async_runtime` fix keeps it
+    /// green, since that runtime handle is a process-global singleton
+    /// usable from any thread, sync or async, runtime-context or none.
+    #[test]
+    fn tail_run_does_not_panic_when_called_outside_any_tokio_runtime() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let tails = TailRegistry::new();
+
+        let joined = std::thread::spawn(move || {
+            // No `#[tokio::test]`, no `Runtime::new().block_on(...)` — this
+            // thread has never touched Tokio at all, matching exactly what
+            // a sync `#[tauri::command]` gets dispatched onto.
+            tail_run(
+                handle,
+                tails,
+                "/some/never-opened/repo".to_string(),
+                "no-runtime-thread".to_string(),
+            );
+        })
+        .join();
+
+        assert!(
+            joined.is_ok(),
+            "tail_run must not panic when called from a thread with no ambient Tokio runtime"
         );
     }
 
