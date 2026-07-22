@@ -28,6 +28,7 @@
     RunSummary,
   } from "$lib/types";
   import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
+  import { reconcileDecision } from "$lib/reconcile";
   import { formatDuration } from "$lib/time";
   import type { BoardMeterOverride } from "$lib/readiness";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
@@ -517,15 +518,90 @@
     return newest;
   }
 
+  // The shared reconcile pipeline (docs/run-journal.md's "Desktop app
+  // changes when this lands", item 2, plus its CLI-visibility-poll demo
+  // consequence): both hydration (on device open) and the CLI poll (every
+  // `CLI_POLL_MS` while a device is active) read the same journal listing
+  // and need the same per-command decision — they used to duplicate this
+  // pipeline with different, individually wrong rules (hydration would
+  // silently skip a command whose newest run_id had moved on without ever
+  // tailing the new one; the poll could stomp a run that had *just* started
+  // in this app with the previous run's now-stale summary). One function,
+  // driven by `reconcileDecision`'s pure per-command rule (see
+  // reconcile.ts), closes both: `hydrateRuns`/`pollRuns` below are now thin
+  // wrappers — same reconcile, different call cadence.
+  function reconcile(path: string, summaries: RunSummary[]) {
+    const newest = newestRunPerCommand(summaries);
+    const forRepo = { ...(runsByRepo[path] ?? {}) };
+    let changed = false;
+    for (const [commandId, summary] of newest) {
+      const current = forRepo[commandId];
+      const decision = reconcileDecision(current, summary);
+      switch (decision.action) {
+        case "seed":
+        case "reseed":
+          // No record yet, or the journal's newest run for this command has
+          // moved on to a genuinely newer one than what we held (the
+          // recency guard already ruled out "stale poll response" — see
+          // reconcileDecision). Either way this is a fresh start: reseed
+          // from the summary, latch a failure it already reports, and tail
+          // it if it's still running.
+          forRepo[commandId] = recordFromSummary(summary);
+          latchFailureFromSummary(path, commandId, summary);
+          changed = true;
+          if (summary.status === "running") startTail(path, commandId, summary.run_id);
+          break;
+        case "refresh":
+          // Same run_id as the record we already hold. Only the
+          // crash/missed-exit catch-up needs doing here: this record still
+          // says running but the journal no longer does, and nothing is
+          // actively tailing it (the tail's own synthesized exit should
+          // normally beat us here; this is cheap insurance against ever
+          // missing it — real now that Step 1 makes `activeTails` populated
+          // for every run source, not just hydration/poll/lazy ones). A
+          // fresh tail replays the backlog from offset 0, so reset the
+          // replayable fields first — otherwise every line this record
+          // already streamed live would be appended a second time on top of
+          // itself. (This manual reset is a stand-in for fix round 2's
+          // generation-fenced in-band reset — see docs/run-journal.md.)
+          if (
+            current!.running &&
+            summary.status !== "running" &&
+            !activeTails.has(current!.runId)
+          ) {
+            forRepo[commandId] = {
+              ...current!,
+              lines: [],
+              step: null,
+              stepHistory: [],
+              progress: null,
+              status: null,
+            };
+            changed = true;
+            startTail(path, commandId, current!.runId);
+          }
+          break;
+        case "skip":
+          // A different run_id than the one we hold, but our record is
+          // still live and the summary's own start time isn't any later —
+          // the journal simply hasn't caught up to the run we hold live
+          // yet. Leave it alone: applying this summary would stomp a fresh
+          // run with the previous one's now-stale snapshot.
+          break;
+      }
+    }
+    if (changed) runsByRepo = { ...runsByRepo, [path]: forRepo };
+  }
+
   // Hydration (docs/run-journal.md's "Desktop app changes when this lands",
   // item 2): seeds every command's newest journaled run into its record so
   // runs survive an app restart, then eagerly tails only the ones still
   // running (a finished run's output is filled in lazily — see
-  // `maybeLazyTail`). Never overwrites a record already present for a
-  // command — `loadRepo` calls this on every switch back to an
-  // already-visited device this session, and the live in-memory record
-  // (whether from a run started this session or an earlier hydration/poll)
-  // is always more authoritative than a fresh disk read.
+  // `maybeLazyTail`). `loadRepo` calls this on every switch back to an
+  // already-visited device this session too — `reconcile`'s recency guard
+  // is what keeps a live in-memory record from being clobbered by a stale
+  // disk read then, while still reseeding when a genuinely newer run
+  // (started while this device sat inactive in the rack) has superseded it.
   async function hydrateRuns(path: string) {
     let summaries: RunSummary[];
     try {
@@ -537,33 +613,15 @@
       return;
     }
     if (repoPath !== path) return; // stale-switch guard, same pattern as loadDoctor
-    const newest = newestRunPerCommand(summaries);
-    const forRepo = { ...(runsByRepo[path] ?? {}) };
-    let changed = false;
-    for (const [commandId, summary] of newest) {
-      if (forRepo[commandId]) continue;
-      forRepo[commandId] = recordFromSummary(summary);
-      latchFailureFromSummary(path, commandId, summary);
-      changed = true;
-    }
-    if (changed) runsByRepo = { ...runsByRepo, [path]: forRepo };
-    for (const [commandId, summary] of newest) {
-      if (summary.status === "running") startTail(path, commandId, summary.run_id);
-    }
+    reconcile(path, summaries);
   }
 
   // The CLI-run-visibility poll (docs/run-journal.md's demo consequence of
   // hydration): while a device is active, keep re-reading its journal so a
   // run started outside this app window (a real `pult deploy` typed in a
   // terminal, or another window of this same app) shows up without the user
-  // doing anything. A command's newest run_id differing from what this
-  // session already knows — whether because the command had no record at
-  // all yet or because a fresh run superseded the one we had — means "never
-  // seen before"; a same-run_id record we still believe is running but the
-  // journal no longer does is the crash/missed-exit catch-up path (normally
-  // redundant with the tail's own synthesized exit, but cheap insurance
-  // against ever missing it — `startTail` on an id already being tailed is a
-  // no-op both here and at the backend, so this never double-handles).
+  // doing anything — same `reconcile` pipeline as hydration, just on a
+  // `CLI_POLL_MS` cadence instead of once on open.
   async function pollRuns(path: string) {
     let summaries: RunSummary[];
     try {
@@ -573,36 +631,7 @@
       return;
     }
     if (repoPath !== path || activePollPath !== path) return; // switched/stopped mid-request
-    const newest = newestRunPerCommand(summaries);
-    const forRepo = { ...(runsByRepo[path] ?? {}) };
-    let changed = false;
-    for (const [commandId, summary] of newest) {
-      const current = forRepo[commandId];
-      if (!current || current.runId !== summary.run_id) {
-        forRepo[commandId] = recordFromSummary(summary);
-        latchFailureFromSummary(path, commandId, summary);
-        changed = true;
-        if (summary.status === "running") startTail(path, commandId, summary.run_id);
-      } else if (current.running && summary.status !== "running" && !activeTails.has(current.runId)) {
-        // Catch-up: this record still says running but the journal no
-        // longer does, and nothing is actively tailing it (the tail's own
-        // synthesized exit should normally beat us here). A fresh tail
-        // replays the backlog from offset 0, so reset the replayable
-        // fields first — otherwise every line this record already
-        // streamed live would be appended a second time on top of itself.
-        forRepo[commandId] = {
-          ...current,
-          lines: [],
-          step: null,
-          stepHistory: [],
-          progress: null,
-          status: null,
-        };
-        changed = true;
-        startTail(path, commandId, current.runId);
-      }
-    }
-    if (changed) runsByRepo = { ...runsByRepo, [path]: forRepo };
+    reconcile(path, summaries);
   }
 
   function stopActivePoll() {
