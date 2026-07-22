@@ -186,6 +186,16 @@ export async function stopRun(_path: string, runId: string): Promise<void> {
   stoppedRuns.add(runId);
 }
 
+// Run ids currently being actively driven — by `runCommand` for a fresh
+// in-app run, or by `tailRun` for the scripted "CLI-started" run below —
+// mirroring the real backend's `TailRegistry` (src-tauri/src/journal.rs):
+// `tailRun` no-ops for any id already in here, so the explicit `tailRun`
+// call `startTail` makes right after an app-started run's `runCommand`
+// resolves (see +page.svelte's `handleRun`) never double-drives the script
+// or synthesizes a spurious "never journaled" exit out from under a run
+// that's actually still going.
+const drivingRuns = new Set<string>();
+
 // Drives one script's actions into `emit`, checking `stoppedRuns` before
 // each — the one place both `runCommand` (a fresh in-app run) and `tailRun`
 // (the scripted "CLI-started" run, see below) turn a `MockScript` into
@@ -222,15 +232,23 @@ async function driveScript(
   emit({ kind: "exit", run_id: runId, code: script.exitCode, stopped: false });
 }
 
+// Matches the real backend's contract (src/lib/real/backend.ts): resolves
+// once the run is under way, not once it finishes, and delivers its events
+// through the same in-module channel `subscribeRunOutput` feeds
+// (`emitRunOutput`, defined below) rather than a dedicated per-call
+// callback — so an app-started mock run routes through +page.svelte's
+// `activeTails` exactly the way a real one does.
 export async function runCommand(
   _path: string,
   id: string,
   _values: Record<string, string>,
   runId: string,
-  onEvent: (event: RunEvent) => void,
 ): Promise<void> {
   const script = MOCK_SCRIPTS[id] ?? DEFAULT_SCRIPT;
-  return driveScript(script, runId, onEvent);
+  drivingRuns.add(runId);
+  void driveScript(script, runId, emitRunOutput).finally(() => {
+    drivingRuns.delete(runId);
+  });
 }
 
 // --- Journal-reader demo surface -----------------------------------------
@@ -256,8 +274,9 @@ export async function runCommand(
 //     up on the board" without any real CLI process behind it.
 //
 // A shared in-module pub/sub stands in for the real backend's Tauri event
-// channel, so `tailRun` here can deliver events the same "fire and forget,
-// listen separately" way `subscribeRunOutput` expects on both backends.
+// channel, so `tailRun` (and `runCommand` above, for an app-started run) can
+// deliver events the same "fire and forget, listen separately" way
+// `subscribeRunOutput` expects on both backends.
 const outputListeners = new Set<(event: RunEvent) => void>();
 
 function emitRunOutput(event: RunEvent): void {
@@ -407,7 +426,6 @@ let cliRunFirstSeenAt: number | null = null;
 let cliRunPhase: "hidden" | "running" | "done" = "hidden";
 let cliRunStartedAt = 0;
 let cliRunEndedAt: string | null = null;
-let cliRunDriving = false;
 
 export async function listRuns(path: string): Promise<RunSummary[]> {
   await delay(60);
@@ -436,6 +454,12 @@ export async function listRuns(path: string): Promise<RunSummary[]> {
 
 export async function tailRun(path: string, runId: string): Promise<void> {
   if (path !== FIXTURE_PATH) return;
+  // Already being driven — either `runCommand` just started this run and
+  // `startTail`'s explicit `tailRun` call (see +page.svelte's `handleRun`)
+  // is only here to match the real backend's single-tail-creation-path
+  // shape, or a previous `tailRun` call is already driving the CLI run
+  // below. Either way, no-op, same as the real backend's `TailRegistry`.
+  if (drivingRuns.has(runId)) return;
   const replay = HISTORY_REPLAY[runId];
   if (replay) {
     await delay(150);
@@ -448,13 +472,13 @@ export async function tailRun(path: string, runId: string): Promise<void> {
     return;
   }
   if (runId === CLI_RUN_ID) {
-    if (cliRunDriving || cliRunPhase !== "running") return; // already driving, or finished/not-yet-visible
-    cliRunDriving = true;
+    if (cliRunPhase !== "running") return; // finished, or not yet visible
+    drivingRuns.add(runId);
     const script = MOCK_SCRIPTS[CLI_RUN_COMMAND_ID] ?? DEFAULT_SCRIPT;
     await driveScript(script, runId, emitRunOutput);
     cliRunPhase = "done";
     cliRunEndedAt = new Date().toISOString();
-    cliRunDriving = false;
+    drivingRuns.delete(runId);
     return;
   }
   // Unknown to this mock (never in `HISTORY_RUNS`/`CLI_RUN_ID`) — mirror the

@@ -45,44 +45,21 @@ export async function resolvePickSource(
   return invoke<string[]>("resolve_pick_source", { path, commandId, paramName, values });
 }
 
-// `run_command` now spawns pult detached and returns as soon as the backend
-// has started tailing its journal, not when the run finishes (see
-// docs/run-journal.md) — so this must resolve on this run_id's own `exit`
-// event, not on `invoke` completion. Listen is wired up before `invoke` is
-// even called, so no early event on a fast run can be missed; every event
-// (including a synthesized crash `exit` if pult never journaled at all —
-// see `crate::journal::tail_run`'s bounded wait) still reaches `onEvent`.
+// `run_command` spawns pult detached and returns as soon as the process is
+// launched — it no longer starts a tail itself (see
+// src-tauri/src/commands.rs). Tailing is the frontend's job: the caller
+// (+page.svelte's `handleRun`) invokes `tailRun` explicitly once this
+// resolves, the same single tail-creation path every other run source
+// (hydration, the poll, a lazy tail) already goes through. This just
+// forwards the invoke and lets a spawn error (a bad path, pult missing,
+// pult itself rejecting the run) surface as a rejection.
 export async function runCommand(
   path: string,
   id: string,
   values: Record<string, string>,
   runId: string,
-  onEvent: (event: RunEvent) => void,
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let unlisten: (() => void) | undefined;
-    const cleanup = () => unlisten?.();
-
-    // The event channel is shared across every in-flight run, so filter to
-    // this call's own run_id — otherwise a concurrent run's output would
-    // leak into this one's output pane (see RunEvent's doc comment).
-    listen<RunEvent>("pult://run-output", (event) => {
-      if (event.payload.run_id !== runId) return;
-      onEvent(event.payload);
-      if (event.payload.kind === "exit") {
-        cleanup();
-        resolve();
-      }
-    })
-      .then((un) => {
-        unlisten = un;
-        return invoke<void>("run_command", { path, id, runId, values });
-      })
-      .catch((e) => {
-        cleanup();
-        reject(e);
-      });
-  });
+  await invoke<void>("run_command", { path, id, runId, values });
 }
 
 // Stop a journaled run: `path` scopes which repo's journal to read `run_id`'s

@@ -75,10 +75,11 @@
   // several runs in flight (hydration can eagerly tail more than one running
   // command) and background devices keep their own tails alive while
   // inactive, so "one listener per tail" would mean stacking up an unbounded
-  // number of them over a session. `runCommand`'s own dedicated per-call
-  // listener (see real/backend.ts) still exists separately for the run it
-  // starts — this map is never populated for those run ids, so the two
-  // never double-handle the same event.
+  // number of them over a session. `runCommand` no longer has a dedicated
+  // per-call listener of its own (see real/backend.ts) — an app-started run
+  // is registered here too, synchronously, before its spawn invoke is even
+  // awaited (see `handleRun`), so every run source in the app now routes
+  // through this one map by run_id.
   const activeTails = new Map<string, (event: RunEvent) => void>();
 
   // Per-device "is a run of mine now visible in the journal that I've never
@@ -805,15 +806,52 @@
     // that is shared.
     const { finish, applyEvent } = makeRunHandlers(path, commandId, runId);
 
+    // Registered SYNCHRONOUSLY, before `runCommand`'s spawn invoke is even
+    // awaited — not after. The record above is already seeded with empty
+    // `lines`, so if the journal-visibility poll fires mid-invoke and this
+    // run_id's catch-up guard checks `activeTails`, it finds this handler
+    // already there (closing the window where a poll could otherwise decide
+    // nobody's tailing a run that's actually just about to be). Registering
+    // late (after `await runCommand`) would leave exactly that window open.
+    activeTails.set(runId, applyEvent);
+
     try {
-      await runCommand(path, commandId, values, runId, applyEvent);
+      await runCommand(path, commandId, values, runId);
     } catch (e) {
+      activeTails.delete(runId);
       finish(null, false, String(e));
+      return;
     }
+    // The spawn succeeded — start (or, if somehow already started, no-op
+    // into) the actual journal tail. `startTail` re-registers this same
+    // handler in `activeTails` (a harmless `Map.set` over the entry above)
+    // and is the one place that invokes the backend's `tail_run` — the
+    // single tail-creation path every run source in the app now shares (see
+    // `activeTails`'s doc comment).
+    startTail(path, commandId, runId);
   }
 
   function handleStop(runId: string) {
-    if (repoPath) void stopRun(repoPath, runId);
+    if (!repoPath) return;
+    const path = repoPath;
+    // `stopRun` only takes a run_id, but reporting a rejection needs the
+    // record-patching path (`patchRun`), which is keyed by command id — find
+    // the command currently holding this run_id so a failure has somewhere
+    // to land.
+    const commandId = Object.entries(runsByRepo[path] ?? {}).find(
+      ([, r]) => r.runId === runId,
+    )?.[0];
+    void stopRun(path, runId).catch((e) => {
+      if (!commandId) return;
+      // Surfaced as a stderr line on the run's own record — same
+      // patch-and-no-op-if-superseded semantics as every other event this
+      // run's handlers apply, not an `alert()`.
+      const { patchRun } = makeRunHandlers(path, commandId, runId);
+      patchRun((current) => ({
+        ...current,
+        lines: [...current.lines, { stream: "stderr", text: String(e) }],
+      }));
+    });
   }
 
   function handleValuesChange(commandId: string, values: Record<string, string>) {
