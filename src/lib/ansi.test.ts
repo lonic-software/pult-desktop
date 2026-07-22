@@ -97,6 +97,36 @@ describe("parseAnsiLine", () => {
     expect(segs).toEqual([{ text: "back to normal", fg: "ansi-1", bg: "ansi-4" }]);
   });
 
+  it("a bare 27 with no preceding 7 is a true no-op (doesn't touch fg/bg)", () => {
+    // Regression test: reverse used to be applied as an immediate fg/bg
+    // swap at parse time, which made a defensive bare 27 (no 7 before it)
+    // wrongly swap colors that were never reversed in the first place. See
+    // the `reversed` flag in ansi.ts's SgrState + its application in
+    // `flush()`.
+    const segs = parseAnsiLine("\x1b[31mred fg\x1b[27mstill red, not bg");
+    expect(segs).toEqual([
+      { text: "red fg", fg: "ansi-1" },
+      { text: "still red, not bg", fg: "ansi-1" },
+    ]);
+  });
+
+  it("7 followed by a later color change still displays that color reversed", () => {
+    // Reverse is a mode flag applied at segment-build time, not a one-shot
+    // swap at the moment 7 is parsed — so a color set *after* 7 (with no
+    // intervening 27) must still render swapped into the opposite slot.
+    const segs = parseAnsiLine("\x1b[7m\x1b[32mgreen while reversed\x1b[0m");
+    expect(segs).toEqual([{ text: "green while reversed", bg: "ansi-2" }]);
+  });
+
+  it("0 (reset) clears reversed along with everything else", () => {
+    const segs = parseAnsiLine("\x1b[31;44;7mreversed\x1b[0mplain\x1b[27mstill plain");
+    expect(segs).toEqual([
+      { text: "reversed", fg: "ansi-4", bg: "ansi-1" },
+      { text: "plain" },
+      { text: "still plain" },
+    ]);
+  });
+
   describe("256-color (38;5;n / 48;5;n)", () => {
     it("maps n < 16 to the same basic palette tokens", () => {
       const segs = parseAnsiLine("\x1b[38;5;9mtext\x1b[0m");

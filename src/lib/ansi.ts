@@ -41,10 +41,17 @@ interface SgrState {
   dim: boolean;
   italic: boolean;
   underline: boolean;
+  /** Reverse video (SGR 7, cleared by 27) — a mode flag, not an immediate
+   *  swap: applied at segment-build time (see `flush()` below) so it stays
+   *  correct across a `7` followed by *further* color changes, and so a
+   *  bare `27` with no preceding `7` is a true no-op rather than an
+   *  accidental swap. See the module comment for the one remaining
+   *  approximation this leaves (reverse over the pane's default colors). */
+  reversed: boolean;
 }
 
 function freshState(): SgrState {
-  return { bold: false, dim: false, italic: false, underline: false };
+  return { bold: false, dim: false, italic: false, underline: false, reversed: false };
 }
 
 const ESC = "\x1b";
@@ -110,28 +117,9 @@ function applySgr(params: number[], state: SgrState): SgrState {
     } else if (p === 24) {
       next.underline = false;
     } else if (p === 7) {
-      // Reverse video: swap fg/bg immediately rather than tracking a
-      // "reversed" boolean flag. Given the module's documented per-line
-      // (rather than fully stateful, cross-escape) design, an immediate
-      // swap is the simplest faithful behavior for the common case (a
-      // single 7 in a line); see the 27 branch below for the tradeoff this
-      // makes.
-      const { fg, bg } = next;
-      next.fg = bg;
-      next.bg = fg;
+      next.reversed = true;
     } else if (p === 27) {
-      // "Not reversed" — the counterpart to 7. There's no stored reversed
-      // flag to clear here (see the 7 branch's comment), so this is a
-      // documented no-op: a line that emits 7 then later 27 without any
-      // color codes in between round-trips correctly (the second swap
-      // undoes the first), but 27 alone (with no preceding 7 in the same
-      // line) has nothing to undo, matching real terminals in that one case
-      // and diverging only in the rarer case of 27 clearing a reverse that
-      // was left over from a previous escape — which per-line parsing
-      // already doesn't carry anyway.
-      const { fg, bg } = next;
-      next.fg = bg;
-      next.bg = fg;
+      next.reversed = false;
     } else if (p >= 30 && p <= 37) {
       next.fg = paletteToken(p - 30);
     } else if (p >= 90 && p <= 97) {
@@ -183,10 +171,24 @@ function tokenize(line: string): Segment[] {
 
   function flush() {
     if (buf === "") return;
+    // Reverse video (see SgrState.reversed) is applied here, at
+    // segment-build time, rather than by mutating fg/bg when `7`/`27` are
+    // parsed — so it stays correct for `7` followed by a later color change
+    // (the new color still displays reversed) and so a bare `27` with no
+    // preceding `7` never touches fg/bg at all.
+    //
+    // Approximation: reversing an unset (default) fg or bg has no visible
+    // effect — the pane's actual default colors aren't modeled in this
+    // module (they're OutputPane's CSS, not something ansi.ts knows), so
+    // there's no concrete color to swap the other side *to*. A real
+    // terminal would swap in its literal default background/foreground;
+    // this is close enough for the log-line use case this parses.
+    const fg = state.reversed ? state.bg : state.fg;
+    const bg = state.reversed ? state.fg : state.bg;
     segments.push({
       text: buf,
-      fg: state.fg,
-      bg: state.bg,
+      fg,
+      bg,
       bold: state.bold || undefined,
       dim: state.dim || undefined,
       italic: state.italic || undefined,
