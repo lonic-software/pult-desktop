@@ -1,9 +1,9 @@
 # Run journal — protocol spec (draft 1)
 
-_Horizon 0 of [the roadmap](./roadmap.md). This draft lives in pult-desktop
-while the protocol is being designed; once implemented it belongs in the
-pult repo's `docs/reference.md` alongside the events protocol, since pult
-is the writer and this document is a contract about what pult writes._
+_This draft lives in pult-desktop while the protocol is being designed;
+once implemented it belongs in the pult repo's `docs/reference.md`
+alongside the events protocol, since pult is the writer and this document
+is a contract about what pult writes._
 
 ## Invariant
 
@@ -12,7 +12,7 @@ regardless of who launched it or who is watching.** The desktop app, the
 CLI's own `--follow`-style features, a future companion app, and a future
 team control plane are all *readers* of this journal. Nothing else is ever
 a source of truth about a run. A design choice that requires a second
-source of truth is wrong (roadmap, closing rule).
+source of truth about runs is wrong.
 
 The invariant exempts **ephemeral runs**, which have no journal-worthy
 identity to begin with: `pult x` (a module source run with no manifest
@@ -76,8 +76,8 @@ Layout:
   runs, rather than accepting a string that could otherwise escape the
   journal's own directory tree on either the writer or a reader side.
 - Run ids are globally unique and permanent: they become subscription keys
-  and URL path segments in roadmap Horizons 2–4. Readers must treat them as
-  opaque.
+  and URL path segments for the future companion app and team control
+  plane. Readers must treat them as opaque.
 
 ## `meta.json`
 
@@ -117,8 +117,9 @@ Field notes:
 - **`status`** has exactly three writer-written values. "Crashed" is not
   among them — it is a *reader-derived* state (below), because a crashed
   writer by definition can't record its own crash.
-- **`origin`** is informational in schema 1; Horizon 3 makes it
-  load-bearing (audit trail of remote triggers).
+- **`origin`** is informational in schema 1; future remote-triggering
+  support makes it load-bearing (audit trail of who triggered a run
+  remotely).
 
 ## `events.jsonl`
 
@@ -274,6 +275,7 @@ translation) exactly as before.
    (colors, partial lines, `\r` progress bars) would need a raw log
    alongside; deferred until something needs it.
 3. **Env fingerprint in meta** (git sha, dirty flag, hostname) — cheap now,
-   valuable for Horizon 4 audit; needs a privacy pass before adding.
+   valuable for future team-service audit; needs a privacy pass before
+   adding.
 4. **Retention by size** as well as count (a single verbose run can be
    huge). Probably `PULT_RUNS_MAX_MB` per repo, prune oldest-first.
