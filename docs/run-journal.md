@@ -14,6 +14,12 @@ team control plane are all *readers* of this journal. Nothing else is ever
 a source of truth about a run. A design choice that requires a second
 source of truth is wrong (roadmap, closing rule).
 
+The invariant exempts **ephemeral runs**, which have no journal-worthy
+identity to begin with: `pult x` (a module source run with no manifest
+behind it) and `--print` (a dry-run preview — nothing executes, so there is
+no run). Everything else — every manifest command, CLI- or app-spawned,
+interactive or not — is journaled.
+
 Two consequences worth stating up front:
 
 - The desktop app stops claiming `PULT_EVENTS` (see "Interaction with
@@ -59,10 +65,16 @@ Layout:
 
 ## Run identity
 
-- `run-id` is a UUID string. The invoker may supply one (`pult <cmd>
-  --run-id <uuid>` — the desktop app keeps generating its own, as today);
-  when absent, pult generates a UUIDv7 so directory listings sort
-  chronologically by name.
+- `run-id` is a UUID string by default. The invoker may instead supply one
+  explicitly (`pult <cmd> --run-id <id>` — the desktop app keeps generating
+  its own, as today); when absent, pult generates a UUIDv7 so directory
+  listings sort chronologically by name.
+- `run-id` is also a directory name, so it's validated: 1–64 ASCII
+  alphanumeric/`-` characters, nothing else. An invalid explicit
+  `--run-id` (a path with `/`, `..`, or an absolute prefix, say) is a
+  **usage error** — pult refuses the invocation up front, before anything
+  runs, rather than accepting a string that could otherwise escape the
+  journal's own directory tree on either the writer or a reader side.
 - Run ids are globally unique and permanent: they become subscription keys
   and URL path segments in roadmap Horizons 2–4. Readers must treat them as
   opaque.
@@ -141,13 +153,26 @@ this is "PULT_EVENTS plus stdout/stderr plus exit, as JSON":
   per line (output is human-paced; per-line `write(2)` is nothing).
   `fsync` is required only on `meta.json` status transitions, not per
   event line — after a power loss a run may lose trailing output but never
-  its outcome-vs-crashed distinction.
+  its outcome-vs-crashed distinction. A status transition writes
+  `meta.json.tmp`, fsyncs its contents, renames it into place, then
+  best-effort fsyncs the containing run directory too — the rename itself
+  is a directory-entry update, which needs its own fsync on most
+  filesystems to survive a crash right after.
 - A reader may observe a torn final line (crash mid-append). Readers must
   treat an unparseable *last* line of the file as "not yet written".
 - **Interactive commands** (`interactive: true`): the terminal owns the
   tty, so pult journals `meta.json` and the `exit` event only —
   `events.jsonl` legitimately contains a single line. Readers render these
   as "ran in terminal".
+- **Non-unix (Windows) targets: journaling is disabled entirely, for now.**
+  Crash detection depends on a liveness probe for the writer process, and
+  no cheap equivalent to unix's signal-0 exists there yet — journaling
+  into a `running` state a reader could never resolve (no way to ever
+  detect the writer died) would be worse than not journaling at all, so
+  pult on Windows simply doesn't journal a run rather than doing that.
+  Revisit once an `OpenProcess`-based probe lands. Readers on any platform
+  may still encounter journals a unix pult wrote (a shared drive, a synced
+  state dir) and read them normally — this only affects the writer.
 
 ### Reader rules
 
@@ -156,12 +181,14 @@ this is "PULT_EVENTS plus stdout/stderr plus exit, as JSON":
   Readers never write inside a run directory, and never delete one that is
   `status: "running"` with a live process.
 - **Crash detection:** `status: "running"` + dead process = render as
-  *crashed*. Liveness = signal-0 the `pgid` (pid on Windows). Pid reuse
-  across reboots is real; a reader that knows the boot time may treat any
-  `running` run whose `started_at` predates boot as crashed without
-  probing. Schema 1 accepts the residual within-boot reuse risk; if it
-  ever bites, an additive `proc_started_at` field fixes it without a major
-  version.
+  *crashed*. The liveness probe is the writer **pid** (`meta.json`'s
+  `pid`, the journaling pult process — not its child, and not the
+  `pgid`, which is a separate capability used only to *stop* a run, never
+  to probe it). Pid reuse across reboots is real; a reader that knows the
+  boot time may treat any `running` run whose `started_at` predates boot
+  as crashed without probing. Schema 1 accepts the residual within-boot
+  reuse risk; if it ever bites, an additive `proc_started_at` field fixes
+  it without a major version.
 
 ## Stopping a run — including one you didn't spawn
 
@@ -175,9 +202,11 @@ forward/await its child tree, append the `exit` event with
 `SIGKILL`ed pult can't do any of that — the run is then simply found later
 by crash detection, which is the honest description of what happened.
 
-Windows: no process groups or signal ladder; `TerminateProcess` on the
-pid, and the run resolves as crashed rather than cleanly stopped. Same
-degradation the desktop's stop already has there today.
+Windows: moot for now, since journaling itself is off there (see Writer
+rules) — there is no journaled `pgid` to signal in the first place.
+Stopping an app-spawned run on Windows falls back to whatever
+non-journal-based mechanism the desktop's stop feature already uses there
+today (`TerminateProcess` on the pid).
 
 ## Interaction with `PULT_EVENTS` (breaking-ish change, by design)
 
@@ -197,6 +226,21 @@ other wrappers; the spec's requirement is only that *journaling happens at
 whatever point pult still sees the events*, and a wrapper that claims the
 channel accepts that step/progress/status won't be journaled for its runs
 (lines and exit still are, since those flow through pult regardless).
+
+**Implementation detail, not a protocol change:** when pult owns the
+channel for a journaled run, it no longer assumes fd 3 is free and
+`dup2`s the pipe's write end onto it — the journal's own `events.jsonl`
+handle routinely occupies low fds by the time the channel is wired up, and
+an invoker-passed descriptor (`pult import 3<seed.txt`) deserves to
+survive untouched rather than win a coin toss against the channel. Instead
+pult passes the pipe's write end through on **its own fd number** —
+`PULT_EVENTS=<n>` for whatever `n` the pipe actually got, CLOEXEC cleared,
+no `dup2` at all. This is legal only because the wire protocol already
+requires every child to read the fd number from `$PULT_EVENTS` rather than
+assuming `3`; that existing rule is what makes fd number irrelevant to a
+well-behaved child. The passthrough rule is unaffected: an invoker-passed
+`PULT_EVENTS` still wins outright (pult creates no pipe, does no
+translation) exactly as before.
 
 ## Retention
 
