@@ -11,17 +11,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::oneshot;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::types::{Listing, RunEvent};
+use crate::types::Listing;
 
 const SETTINGS_STORE: &str = "settings.json";
 const PULT_PATH_KEY: &str = "pultPath";
@@ -156,9 +154,7 @@ pub async fn run_capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Couldn't run pult: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Couldn't run pult: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         if let Some(data) = stdin_data {
@@ -240,7 +236,9 @@ pub async fn resolve_pick_source(
     let depends_on = param.depends_on.clone().unwrap_or_default();
     for dep in &depends_on {
         if !values.contains_key(dep) {
-            return Err(format!("{param_name} depends on {dep}, which has no value yet"));
+            return Err(format!(
+                "{param_name} depends on {dep}, which has no value yet"
+            ));
         }
     }
 
@@ -248,7 +246,11 @@ pub async fn resolve_pick_source(
     // `run_dir` is where commands and option sources execute (differs from
     // `dir` only in user scope, per docs/reference.md's field notes); fall
     // back to the given path defensively if a future schema ever omits it.
-    let cwd = if listing.run_dir.is_empty() { path } else { &listing.run_dir };
+    let cwd = if listing.run_dir.is_empty() {
+        path
+    } else {
+        &listing.run_dir
+    };
 
     run_pick_source(&script, cwd).await
 }
@@ -395,423 +397,70 @@ async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String>
     Ok(options)
 }
 
-/// How long a stopped run gets after `SIGTERM` before this app escalates to
-/// `SIGKILL` (unix only — see [`run_streaming`]). pult itself has no opinion
-/// on this; it's purely this app's own grace period for `stop_run`.
-const STOP_GRACE: Duration = Duration::from_secs(3);
-
-/// Registry of in-flight runs, shared as Tauri managed state (see
-/// `src-tauri/src/lib.rs`). Maps `run_id` to a one-shot "please stop" signal
-/// for the task that owns that run's child process — [`RunRegistry::request_stop`]
-/// (what the `stop_run` Tauri command calls) is the only thing that ever
-/// sends on it; [`run_streaming`] is the only thing that ever receives. An
-/// entry is removed the moment its run ends, whether it exited on its own or
-/// was stopped, so a `stop_run` call for a `run_id` that's already finished
-/// (or never existed) is a clean, reportable error rather than a silent
-/// no-op.
-#[derive(Clone, Default)]
-pub struct RunRegistry(Arc<Mutex<HashMap<String, RunHandle>>>);
-
-struct RunHandle {
-    stop_tx: oneshot::Sender<()>,
-    /// The child's pid — kept for introspection/tests ([`RunRegistry::pid_of`]).
-    /// The actual stop happens inside [`run_streaming`], which already has
-    /// direct access to the `Child`; nothing here needs the pid back to act
-    /// on it.
-    pid: Option<u32>,
-}
-
-impl RunRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn register(&self, run_id: String, pid: Option<u32>) -> oneshot::Receiver<()> {
-        let (tx, rx) = oneshot::channel();
-        self.0.lock().unwrap().insert(run_id, RunHandle { stop_tx: tx, pid });
-        rx
-    }
-
-    fn unregister(&self, run_id: &str) {
-        self.0.lock().unwrap().remove(run_id);
-    }
-
-    /// The pid of a currently-registered run, if any. Only meaningful for
-    /// introspection/tests — `run_streaming` never needs this back from the
-    /// registry, it already holds the `Child` it came from.
-    pub fn pid_of(&self, run_id: &str) -> Option<u32> {
-        self.0.lock().unwrap().get(run_id).and_then(|h| h.pid)
-    }
-
-    /// Signal a running command to stop. Errs with a user-facing sentence if
-    /// `run_id` isn't currently running — the frontend shows this verbatim.
-    pub fn request_stop(&self, run_id: &str) -> Result<(), String> {
-        let handle = self
-            .0
-            .lock()
-            .unwrap()
-            .remove(run_id)
-            .ok_or_else(|| "That run has already finished.".to_string())?;
-        // If the receiving end already dropped (the run finished in a race
-        // with this call), there's nothing left to stop — not worth
-        // surfacing as a distinct error, since "already finished" describes
-        // exactly that outcome too.
-        let _ = handle.stop_tx.send(());
-        Ok(())
-    }
-}
-
-/// Spawn `pult <id> --params-json`, streaming stdout/stderr — and, on unix,
-/// `PULT_EVENTS` machine events — to `emit` as they arrive, then a final
-/// `Exit` event once the child exits (naturally, or because `stop_run` /
-/// [`RunRegistry::request_stop`] stopped it). AppHandle-free like
-/// [`run_capture`]/[`resolve_pick_source`] above, so it's unit-testable
-/// without a Tauri window (see this crate's `tests/pult_backend.rs`);
-/// `commands::run_command` is the thin `#[tauri::command]` wrapper that
-/// resolves the binary and turns `emit` into
-/// `app.emit("pult://run-output", …)`.
+/// Spawn `pult <id> --params-json --run-id <run_id>` **detached**: pult owns
+/// its own journal and its own `PULT_EVENTS` channel now (see
+/// `docs/run-journal.md`), so this app no longer pipes stdout/stderr, no
+/// longer claims `PULT_EVENTS`, and no longer tracks the child to stop it —
+/// a repo-scoped `crate::journal::tail_run` reads everything back from the
+/// run's journal instead, and `crate::journal::stop_run` signals the
+/// journaled `pgid` directly. Values are still fed as JSON on stdin exactly
+/// as before (keeps secrets out of argv/shell history); stdout/stderr are
+/// `Stdio::null()` since nothing here reads them.
 ///
-/// ## The `PULT_EVENTS` channel (unix only)
+/// `PULT_ORIGIN=desktop` is set so the journal's `meta.json.origin` records
+/// who spawned the run. The child is placed in its own process group (unix
+/// only, `process_group(0)`) — matching `meta.json`'s `pgid`, the stop
+/// capability any reader (including this app's own `stop_run`) signals.
 ///
-/// pult's documented passthrough rule (the pult repo's `docs/reference.md`,
-/// "Events protocol — `PULT_EVENTS`"): "if `PULT_EVENTS` is already set in
-/// pult's own environment when it runs a command, pult does nothing — no
-/// pipe, no translation. The var and its fd inherit through to the child as-
-/// is." So this app claims the channel itself, the same "replicate pult's
-/// documented behavior rather than invent new ones" approach
-/// [`resolve_pick_source`] already takes for `pick.source`: create an OS
-/// pipe, hand the write end to the spawned `pult` process as fd 3 (the fd
-/// number pult's own internal channel uses today, per the doc's "always
-/// read the number from `$PULT_EVENTS`" note — any number would work, 3
-/// just avoids surprising anyone who greps for it), set `PULT_EVENTS=3` in
-/// its environment, and read lines off the read end concurrently with
-/// stdout/stderr, parsing each with [`crate::events::parse`]
-/// (malformed/unknown lines are silently ignored, matching the protocol's
-/// own stated leniency — never an error, never a crashed run).
+/// A background task reaps the child (`child.wait()`) so it never becomes a
+/// zombie while this app is alive; if the app quits first the run simply
+/// keeps going, journaled — the desired quit behavior per the run-journal
+/// spec (a run's lifetime is decoupled from any viewer's).
 ///
-/// The write end is `dup2`'d into the child during `pre_exec` (async-signal-
-/// safe; runs after `fork`, before `exec`, in the child's own copy of the fd
-/// table) rather than passed via `Stdio`, since neither `std` nor `tokio`
-/// have a first-class "extra inherited fd" API — this mirrors pult's own
-/// `src/runner.rs::run_with_own_channel`, right down to the fd-3-already-
-/// free edge case (`std::io::pipe()` creates both ends close-on-exec; if the
-/// write end happens to already land on fd 3, `dup2(3, 3)` is a defined
-/// no-op that does *not* clear that flag, so it's cleared directly via
-/// `fcntl` instead — see `unix_run::wire_up`). This process's own copy of
-/// the write end is dropped in the parent right after spawning — otherwise
-/// it would keep the pipe open forever from this end too, and the reader
-/// would never see EOF — so EOF (and the reader task's natural exit)
-/// arrives exactly when `pult` and everything it spawned have closed their
-/// copies, i.e. exactly when the run is done producing events.
-///
-/// Windows has no equivalent of `pre_exec`/arbitrary-fd-inheritance in
-/// `std::process`, so there this never sets `PULT_EVENTS` and never creates
-/// a pipe: no step/progress/status events flow, but stdout/stderr streaming
-/// and stopping a run both work the same as on unix.
-///
-/// ## Stopping a run
-///
-/// The spawned `pult` process is placed in its own process group (unix
-/// only, `process_group(0)`) so a stop kills the whole tree it started —
-/// pult's own `sh -c "<script>"` child (and anything *that* forks) inherits
-/// the group unless something explicitly calls `setpgid`, which nothing
-/// here does. `registry` hands back a one-shot receiver this function races
-/// against `child.wait()`; once `stop_run` fires it, this sends `SIGTERM` to
-/// the group, waits up to [`STOP_GRACE`] for a clean exit, and escalates to
-/// `SIGKILL` if the group is still alive. Windows has no signal-a-group
-/// primitive in `std`, so there `child.start_kill()` (a `TerminateProcess`
-/// call, and per the task this app targets, sufficient on its own) is used
-/// directly instead, with no group/escalation concept to add.
-pub async fn run_streaming(
+/// This only reports a *spawn-level* failure (binary missing, exec failed).
+/// Whether pult then actually journals the run (a too-old binary might not
+/// understand `--run-id` at all, or there's a startup race before the run
+/// dir exists) is something only the journal tail can observe — see
+/// `crate::journal::tail_run`'s bounded wait for the run dir to appear.
+pub async fn spawn_run(
     bin: &PathBuf,
     dir: &str,
     id: &str,
     values: &HashMap<String, String>,
-    run_id: String,
-    registry: &RunRegistry,
-    emit: impl Fn(RunEvent) + Send + Sync + 'static,
+    run_id: &str,
 ) -> Result<(), String> {
-    let emit: Arc<dyn Fn(RunEvent) + Send + Sync> = Arc::new(emit);
     let payload = serde_json::to_string(values).map_err(|e| e.to_string())?;
 
     let mut cmd = Command::new(bin);
     cmd.arg(id)
         .arg("--params-json")
+        .arg("--run-id")
+        .arg(run_id)
         .current_dir(dir)
+        .env("PULT_ORIGIN", "desktop")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
     #[cfg(unix)]
     cmd.process_group(0);
 
-    #[cfg(unix)]
-    let events_pipe = unix_run::wire_up(&mut cmd)?;
-
-    let mut child = cmd.spawn().map_err(|e| format!("Couldn't start pult: {e}"))?;
-
-    // Drop this process's own copy of the events pipe's write end right
-    // after spawning (see this function's doc comment for why): the child
-    // now holds the only other copy (dup2'd in pre_exec), so once it — and
-    // anything it spawned that inherited fd 3 — closes its copy, the reader
-    // below sees EOF.
-    #[cfg(unix)]
-    let events_reader = {
-        let (reader, writer) = events_pipe;
-        drop(writer);
-        reader
-    };
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Couldn't start pult: {e}"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(payload.as_bytes()).await;
         // dropped here: closes stdin so pult doesn't wait for more input
     }
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
-
-    let out_emit = Arc::clone(&emit);
-    let out_run_id = run_id.clone();
-    let out_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(text)) = lines.next_line().await {
-            out_emit(RunEvent::Line {
-                run_id: out_run_id.clone(),
-                stream: "stdout".to_string(),
-                text,
-            });
-        }
-    });
-
-    let err_emit = Arc::clone(&emit);
-    let err_run_id = run_id.clone();
-    let err_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(text)) = lines.next_line().await {
-            err_emit(RunEvent::Line {
-                run_id: err_run_id.clone(),
-                stream: "stderr".to_string(),
-                text,
-            });
-        }
-    });
-
-    // Read+parse the events pipe on a blocking task (std::io::PipeReader has
-    // no async counterpart) concurrently with the stdout/stderr streams
-    // above — same "one task per stream" shape, just spawn_blocking instead
-    // of spawn since this reader is synchronous.
-    #[cfg(unix)]
-    let events_task = {
-        let ev_emit = Arc::clone(&emit);
-        let ev_run_id = run_id.clone();
-        tokio::task::spawn_blocking(move || unix_run::read_events(events_reader, ev_run_id, ev_emit))
-    };
-
-    let pid = child.id();
-    let stop_rx = registry.register(run_id.clone(), pid);
-
-    let (status, stopped) = wait_or_stop(&mut child, pid, stop_rx).await?;
-    registry.unregister(&run_id);
-
-    let _ = out_task.await;
-    let _ = err_task.await;
-    #[cfg(unix)]
-    let _ = events_task.await;
-
-    emit(RunEvent::Exit {
-        run_id,
-        code: status.code(),
-        stopped,
+    // Reap in the background rather than awaiting here: `run_command`
+    // returns as soon as the tail has started, not when the run finishes.
+    tokio::spawn(async move {
+        let _ = child.wait().await;
     });
 
     Ok(())
-}
-
-/// Race `child.wait()` against a stop request, escalating `SIGTERM` →
-/// `SIGKILL` (unix) or re-issuing `start_kill` (elsewhere) once
-/// [`STOP_GRACE`] passes without the child exiting. Returns the exit status
-/// and whether this was a stop rather than a natural exit — see
-/// [`run_streaming`]'s doc comment.
-async fn wait_or_stop(
-    child: &mut Child,
-    pid: Option<u32>,
-    stop_rx: oneshot::Receiver<()>,
-) -> Result<(std::process::ExitStatus, bool), String> {
-    tokio::select! {
-        status = child.wait() => {
-            Ok((status.map_err(|e| format!("pult didn't exit cleanly: {e}"))?, false))
-        }
-        _ = stop_rx => {
-            request_termination(child, pid);
-            let status = tokio::select! {
-                status = child.wait() => Some(status),
-                _ = tokio::time::sleep(STOP_GRACE) => None,
-            };
-            let status = match status {
-                Some(status) => status,
-                None => {
-                    escalate_termination(child, pid);
-                    child.wait().await
-                }
-            };
-            Ok((status.map_err(|e| format!("pult didn't exit cleanly: {e}"))?, true))
-        }
-    }
-}
-
-#[cfg(unix)]
-fn request_termination(_child: &mut Child, pid: Option<u32>) {
-    if let Some(pid) = pid {
-        unix_run::signal_group(pid, unix_run::SIGTERM);
-    }
-}
-#[cfg(not(unix))]
-fn request_termination(child: &mut Child, _pid: Option<u32>) {
-    // No group/signal concept in std on Windows — TerminateProcess via
-    // start_kill is the whole story here (per this app's stop_run spec:
-    // "Windows: child.kill() is fine").
-    let _ = child.start_kill();
-}
-
-#[cfg(unix)]
-fn escalate_termination(_child: &mut Child, pid: Option<u32>) {
-    if let Some(pid) = pid {
-        unix_run::signal_group(pid, unix_run::SIGKILL);
-    }
-}
-#[cfg(not(unix))]
-fn escalate_termination(child: &mut Child, _pid: Option<u32>) {
-    // Best-effort retry in case the first start_kill raced the process not
-    // having fully started yet (tokio documents that as possible); there's
-    // no stronger "are you still there" primitive to check against first.
-    let _ = child.start_kill();
-}
-
-/// Unix-only machinery for [`run_streaming`]: wiring up the `PULT_EVENTS`
-/// pipe and signaling a process group. See that function's doc comment for
-/// the full rationale; this mirrors pult's own `src/runner.rs`'s
-/// `run_with_own_channel` (fd-passing) and adds process-group signaling
-/// (pult itself never needs to kill anything).
-#[cfg(unix)]
-mod unix_run {
-    use std::ffi::c_int;
-    use std::io::{BufRead, BufReader};
-    use std::os::fd::AsRawFd;
-    use std::sync::Arc;
-
-    use tokio::process::Command;
-
-    use crate::events;
-    use crate::types::RunEvent;
-
-    // Rust 2024 requires FFI declarations inside `unsafe extern` blocks; no
-    // new dependency needed; the binary already links the system libc on
-    // unix (pult's own `src/runner.rs` takes the same approach, for the
-    // same reason: this is four constants and three functions, not enough
-    // to justify pulling in the `libc` crate just for these).
-    unsafe extern "C" {
-        fn dup2(oldfd: c_int, newfd: c_int) -> c_int;
-        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
-        fn kill(pid: c_int, sig: c_int) -> c_int;
-    }
-
-    const F_GETFD: c_int = 1;
-    const F_SETFD: c_int = 2;
-    const FD_CLOEXEC: c_int = 1;
-    pub(super) const SIGTERM: c_int = 15;
-    pub(super) const SIGKILL: c_int = 9;
-
-    /// The fd `pult` documents its own `PULT_EVENTS` channel using today
-    /// (docs/reference.md's "Fd 3 conflicts" section) — any number would
-    /// work here since we set `PULT_EVENTS` to match whatever we pick, this
-    /// just avoids surprising anyone who greps for `3`.
-    const EVENTS_FD: c_int = 3;
-
-    /// Create the events pipe and wire its write end into `cmd`'s future
-    /// child at fd [`EVENTS_FD`], setting `PULT_EVENTS` to match. Returns
-    /// `(reader, writer)`: keep the reader, drop the writer in the parent
-    /// right after `spawn()` (see `run_streaming`'s doc comment for why).
-    pub(super) fn wire_up(
-        cmd: &mut Command,
-    ) -> Result<(std::io::PipeReader, std::io::PipeWriter), String> {
-        let (reader, writer) =
-            std::io::pipe().map_err(|e| format!("Couldn't create the events pipe: {e}"))?;
-        let write_fd = writer.as_raw_fd();
-
-        // SAFETY: this closure runs in the child after `fork`, before
-        // `exec`, operating only on that child's own copy of the fd table —
-        // dup2/fcntl are async-signal-safe, so this is sound to run between
-        // fork and exec. `write_fd` stays valid for the closure's lifetime:
-        // `writer` (and the fd it wraps) isn't dropped until after `spawn()`
-        // returns, by which point `fork` has already copied the fd table.
-        unsafe {
-            cmd.pre_exec(move || {
-                if write_fd == EVENTS_FD {
-                    // `std::io::pipe()` creates both ends close-on-exec.
-                    // `dup2(3, 3)` is a defined no-op on Linux/macOS when the
-                    // write end already happens to be fd 3 — it does NOT
-                    // clear FD_CLOEXEC, so without this branch fd 3 would
-                    // close right at exec and the child's events writes
-                    // would silently fail. Clear the flag directly instead.
-                    let flags = fcntl(write_fd, F_GETFD);
-                    if flags == -1 || fcntl(write_fd, F_SETFD, flags & !FD_CLOEXEC) == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                } else if dup2(write_fd, EVENTS_FD) == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        cmd.env("PULT_EVENTS", EVENTS_FD.to_string());
-
-        Ok((reader, writer))
-    }
-
-    /// Blocking read loop for the events pipe — run via `spawn_blocking`
-    /// since `std::io::PipeReader` has no async counterpart. Parses each
-    /// line with [`events::parse`] and calls `emit` for anything that
-    /// parses; malformed/unknown lines are silently dropped, matching the
-    /// protocol's own leniency (see `events`'s module doc). Returns once the
-    /// write end is closed everywhere — `pult` exits and every process it
-    /// spawned that inherited fd 3 has too.
-    pub(super) fn read_events(
-        reader: std::io::PipeReader,
-        run_id: String,
-        emit: Arc<dyn Fn(RunEvent) + Send + Sync>,
-    ) {
-        for line in BufReader::new(reader).lines() {
-            let Ok(line) = line else { break };
-            if let Some(event) = events::parse(&line) {
-                emit(to_run_event(&run_id, event));
-            }
-        }
-    }
-
-    fn to_run_event(run_id: &str, event: events::PultEvent) -> RunEvent {
-        match event {
-            events::PultEvent::Progress { pct, text } => {
-                RunEvent::Progress { run_id: run_id.to_string(), pct, text }
-            }
-            events::PultEvent::Status(text) => RunEvent::Status { run_id: run_id.to_string(), text },
-            events::PultEvent::Step { k, n, name } => {
-                RunEvent::Step { run_id: run_id.to_string(), k, n, name }
-            }
-        }
-    }
-
-    /// Send `sig` to the whole process group `pult` was placed in
-    /// (`process_group(0)` at spawn time makes its pid the pgid too) — a
-    /// negative pid targets the group rather than just the leader, so `sh
-    /// -c` children (and anything *they* fork) are signaled as well.
-    /// Best-effort: if the group is already gone, `kill` returns `ESRCH`,
-    /// which is ignored — nothing left to signal is exactly the state a
-    /// stop wants to reach.
-    pub(super) fn signal_group(pid: u32, sig: c_int) {
-        unsafe {
-            kill(-(pid as c_int), sig);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -892,10 +541,16 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("region".to_string(), "eu-west-1".to_string());
 
-        let script =
-            interpolate_source("echo target-{region}-a; echo target-{region}-b", &depends_on, &values)
-                .unwrap();
-        assert_eq!(script, "echo target-'eu-west-1'-a; echo target-'eu-west-1'-b");
+        let script = interpolate_source(
+            "echo target-{region}-a; echo target-{region}-b",
+            &depends_on,
+            &values,
+        )
+        .unwrap();
+        assert_eq!(
+            script,
+            "echo target-'eu-west-1'-a; echo target-'eu-west-1'-b"
+        );
     }
 
     #[test]
@@ -923,7 +578,10 @@ mod tests {
         let values = HashMap::new();
 
         let err = interpolate_source("echo {region}", &depends_on, &values).unwrap_err();
-        assert!(err.contains("region"), "error should name the offending param: {err}");
+        assert!(
+            err.contains("region"),
+            "error should name the offending param: {err}"
+        );
     }
 
     #[test]

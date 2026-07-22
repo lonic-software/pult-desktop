@@ -1,5 +1,6 @@
 mod commands;
 pub mod events;
+pub mod journal;
 pub mod pult_bin;
 pub mod types;
 
@@ -21,9 +22,10 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        // In-flight runs, keyed by run_id, so `stop_run` can find the one it
-        // was asked to stop — see `pult_bin::RunRegistry`.
-        .manage(pult_bin::RunRegistry::new())
+        // Run ids currently being tailed, so hydration, a fresh spawn and a
+        // poll can never double-tail the same run — see
+        // `journal::TailRegistry`.
+        .manage(journal::TailRegistry::new())
         .invoke_handler(tauri::generate_handler![
             commands::open_repo,
             commands::trust_repo,
@@ -34,6 +36,8 @@ pub fn run() {
             commands::run_command,
             commands::stop_run,
             commands::resolve_pick_source,
+            commands::list_runs,
+            commands::tail_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
