@@ -82,7 +82,18 @@ export type RunEvent =
   | { kind: "step"; run_id: string; k: number; n: number; name: string }
   | { kind: "progress"; run_id: string; pct: number | null; text: string | null }
   | { kind: "status"; run_id: string; text: string }
-  | { kind: "exit"; run_id: string; code: number | null; stopped: boolean };
+  | {
+      kind: "exit";
+      run_id: string;
+      code: number | null;
+      stopped: boolean;
+      /** Reader-derived: the run's journal said "running" but the writing
+       *  pult process was dead (crash detection) — never set on a journaled
+       *  `exit` line itself, only synthesized when the tail never observes
+       *  one. Additive field: absent/undefined means "not a crash", same as
+       *  `false` (the mock backend never sets it at all). */
+      crashed?: boolean;
+    };
 
 export interface OutputLine {
   stream: "stdout" | "stderr" | "exit";
@@ -128,6 +139,25 @@ export interface RunRecord {
   exitCode: number | null;
   startedAt: number;
   endedAt: number | null;
+}
+
+// One entry in `listRuns`'s result — the run journal's history for a repo
+// (see docs/run-journal.md and src-tauri/src/journal.rs::RunSummary), newest
+// first. `status` folds pult-desktop's reader-derived "crashed" detection in
+// alongside the journal's own three writer-written statuses. This is a
+// listing/history shape, not `RunRecord` (the live in-memory run the run
+// view renders) — hydrating a `RunSummary` into a `RunRecord` and tailing it
+// is the next leg's work.
+export interface RunSummary {
+  run_id: string;
+  command_id: string;
+  command_title: string;
+  status: "running" | "exited" | "stopped" | "crashed";
+  exit_code: number | null;
+  started_at: string;
+  ended_at: string | null;
+  origin: string;
+  interactive: boolean;
 }
 
 /** A command's readiness lamp state, derived from doctor + trust.

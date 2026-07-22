@@ -1,7 +1,7 @@
 // The VITE_MOCK=1 stand-in for the real Tauri backend. Mirrors src/lib/api.ts's
 // shape exactly so App.svelte never has to know which one it's talking to.
 
-import type { DoctorReport, Listing, RunEvent } from "../types";
+import type { DoctorReport, Listing, RunEvent, RunSummary } from "../types";
 import { mockDoctorReport, mockListingTrusted, mockListingUntrusted } from "./fixtures";
 
 const FIXTURE_PATH = "/Users/operator/acme-ops";
@@ -181,10 +181,21 @@ const DEFAULT_SCRIPT: MockScript = { actions: [line(180, "running…"), line(180
 // signal.
 const stoppedRuns = new Set<string>();
 
-export async function stopRun(runId: string): Promise<void> {
+export async function stopRun(_path: string, runId: string): Promise<void> {
   await delay(80);
   stoppedRuns.add(runId);
 }
+
+// The real hydration UI (listing + tailing a repo's journal history) is the
+// next leg's work — these are minimal stand-ins so VITE_MOCK still runs:
+// no journal exists in mock mode, so there's simply no history to list, and
+// nothing to tail (the mock's `runCommand` above already drives its own
+// scripted events directly).
+export async function listRuns(_path: string): Promise<RunSummary[]> {
+  return [];
+}
+
+export async function tailRun(_path: string, _runId: string): Promise<void> {}
 
 export async function runCommand(
   _path: string,

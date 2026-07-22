@@ -27,6 +27,8 @@ export const setPultPath = backend.setPultPath;
 export const runCommand = backend.runCommand;
 export const stopRun = backend.stopRun;
 export const resolvePickSource = backend.resolvePickSource;
+export const listRuns = backend.listRuns;
+export const tailRun = backend.tailRun;
 
 // Per-repo param-value persistence (see ./real/paramStore.ts and
 // ./mock/paramStore.ts) — the parameters module's "remembered per repo"

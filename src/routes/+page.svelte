@@ -346,7 +346,7 @@
     // Eject = remove: stop anything still running in that device rather
     // than orphaning child processes nothing will ever look at again.
     for (const run of Object.values(runsByRepo[path] ?? {})) {
-      if (run.running) void stopRun(run.runId);
+      if (run.running) void stopRun(path, run.runId);
     }
     for (const [key, t] of [...boardOverrideTimers]) {
       if (key.startsWith(`${path}\0`)) {
@@ -533,7 +533,7 @@
   }
 
   function handleStop(runId: string) {
-    void stopRun(runId);
+    if (repoPath) void stopRun(repoPath, runId);
   }
 
   function handleValuesChange(commandId: string, values: Record<string, string>) {

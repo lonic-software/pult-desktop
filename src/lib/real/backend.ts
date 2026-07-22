@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { DoctorReport, Listing, RunEvent } from "../types";
+import type { DoctorReport, Listing, RunEvent, RunSummary } from "../types";
 
 export async function pickFolder(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false, title: "Mount a repository" });
@@ -45,6 +45,13 @@ export async function resolvePickSource(
   return invoke<string[]>("resolve_pick_source", { path, commandId, paramName, values });
 }
 
+// `run_command` now spawns pult detached and returns as soon as the backend
+// has started tailing its journal, not when the run finishes (see
+// docs/run-journal.md) — so this must resolve on this run_id's own `exit`
+// event, not on `invoke` completion. Listen is wired up before `invoke` is
+// even called, so no early event on a fast run can be missed; every event
+// (including a synthesized crash `exit` if pult never journaled at all —
+// see `crate::journal::tail_run`'s bounded wait) still reaches `onEvent`.
 export async function runCommand(
   path: string,
   id: string,
@@ -52,22 +59,47 @@ export async function runCommand(
   runId: string,
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
-  // The event channel is shared across every in-flight run, so filter to
-  // this call's own run_id — otherwise a concurrent run's output would leak
-  // into this one's output pane (see RunEvent's doc comment in types.ts).
-  const unlisten = await listen<RunEvent>("pult://run-output", (event) => {
-    if (event.payload.run_id === runId) onEvent(event.payload);
+  return new Promise((resolve, reject) => {
+    let unlisten: (() => void) | undefined;
+    const cleanup = () => unlisten?.();
+
+    // The event channel is shared across every in-flight run, so filter to
+    // this call's own run_id — otherwise a concurrent run's output would
+    // leak into this one's output pane (see RunEvent's doc comment).
+    listen<RunEvent>("pult://run-output", (event) => {
+      if (event.payload.run_id !== runId) return;
+      onEvent(event.payload);
+      if (event.payload.kind === "exit") {
+        cleanup();
+        resolve();
+      }
+    })
+      .then((un) => {
+        unlisten = un;
+        return invoke<void>("run_command", { path, id, runId, values });
+      })
+      .catch((e) => {
+        cleanup();
+        reject(e);
+      });
   });
-  try {
-    await invoke<void>("run_command", { path, id, runId, values });
-  } finally {
-    unlisten();
-  }
 }
 
-// Stop a run started by `runCommand`. `run_id` isn't scoped to a repo path
-// here — the backend's `RunRegistry` is keyed by run_id alone (see
-// `stop_run` in src-tauri/src/commands.rs) — so this is just a pass-through.
-export async function stopRun(runId: string): Promise<void> {
-  await invoke<void>("stop_run", { runId });
+// Stop a journaled run: `path` scopes which repo's journal to read `run_id`'s
+// `pgid` from (see `journal::stop_run` in src-tauri/src/journal.rs) — works
+// identically for a run this app never spawned.
+export async function stopRun(path: string, runId: string): Promise<void> {
+  await invoke<void>("stop_run", { path, runId });
+}
+
+// This repo's run history — every journaled run, newest first (see
+// `journal::list_runs`).
+export async function listRuns(path: string): Promise<RunSummary[]> {
+  return invoke<RunSummary[]>("list_runs", { path });
+}
+
+// Start (or no-op if already tailing) tailing `runId`'s journal — events
+// arrive on the same `pult://run-output` channel `runCommand` uses.
+export async function tailRun(path: string, runId: string): Promise<void> {
+  await invoke<void>("tail_run", { path, runId });
 }
