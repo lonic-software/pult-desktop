@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import {
     doctorCheck,
     getPultPath,
     isMock,
+    listRuns,
     loadRack,
     openRepo,
     pickFolder,
@@ -12,6 +13,8 @@
     saveRack,
     setPultPath,
     stopRun,
+    subscribeRunOutput,
+    tailRun,
     trustRepo,
   } from "$lib/api";
   import type {
@@ -22,6 +25,7 @@
     RackDevice,
     RunEvent,
     RunRecord,
+    RunSummary,
   } from "$lib/types";
   import { breadcrumbFor, groupCommands, type CommandGroup, type GroupedListing } from "$lib/grouping";
   import { formatDuration } from "$lib/time";
@@ -60,6 +64,30 @@
   // suppresses re-prompting on every switch back to that device. Read only
   // inside `loadRepo`, so a plain Set (no reactivity needed).
   const readOnlyPaths = new Set<string>();
+
+  // Journal-reader hydration (docs/run-journal.md "Desktop app changes when
+  // this lands", item 2): every run this app currently has a live tail on —
+  // whether started by `handleRun` itself, hydrated on device open, lazily
+  // tailed when the user opens a finished command's details, or picked up by
+  // the CLI-visibility poll below — routed to its record by run_id. One
+  // `pult://run-output` subscription for the whole app (see the `onMount`
+  // below) rather than one `listen()` per tailed run: a repo can have
+  // several runs in flight (hydration can eagerly tail more than one running
+  // command) and background devices keep their own tails alive while
+  // inactive, so "one listener per tail" would mean stacking up an unbounded
+  // number of them over a session. `runCommand`'s own dedicated per-call
+  // listener (see real/backend.ts) still exists separately for the run it
+  // starts — this map is never populated for those run ids, so the two
+  // never double-handle the same event.
+  const activeTails = new Map<string, (event: RunEvent) => void>();
+
+  // Per-device "is a run of mine now visible in the journal that I've never
+  // seen before" polling — see `pollRuns` below. Only the currently active
+  // device is ever polled (matches the spec's "while a device is active");
+  // switching/ejecting/unmounting always tears the previous one down first.
+  const CLI_POLL_MS = 3000;
+  let activePollTimer: ReturnType<typeof setInterval> | undefined;
+  let activePollPath: string | null = null;
 
   // Per-device session state, keyed by repo path — NOT reset on device
   // switch, so a run kicked off in one device keeps streaming while another
@@ -152,11 +180,23 @@
   function applyBoardOutcome(
     path: string,
     commandId: string,
-    outcome: { stopped: boolean; exitCode: number | null; errorText: string | null },
+    outcome: {
+      stopped: boolean;
+      exitCode: number | null;
+      errorText: string | null;
+      /** pult's writer died without ever journaling an exit (see
+       *  `RunEvent`'s `exit.crashed` doc comment) — its own red-family
+       *  latch, same as any other failure (crashed and stopped are mutually
+       *  exclusive by construction: a crash is only ever derived from a run
+       *  the journal still says is "running"). */
+      crashed?: boolean;
+    },
   ) {
     if (outcome.stopped) {
       setBoardOverride(path, commandId, { kind: "stopped" });
       scheduleOverrideClear(path, commandId, "stopped", STOP_FLASH_MS);
+    } else if (outcome.crashed) {
+      setBoardOverride(path, commandId, { kind: "run-failed" });
     } else if (outcome.errorText === null && outcome.exitCode === 0) {
       setBoardOverride(path, commandId, { kind: "success" });
       scheduleOverrideClear(path, commandId, "success", SUCCESS_PULSE_MS);
@@ -280,11 +320,273 @@
     }
   }
 
+  // Builds a fresh `RunRecord` straight from the journal's own summary of a
+  // run this session has never seen live — hydration on device open, and the
+  // CLI-visibility poll's "never seen this run_id before" branch, both go
+  // through this. `lines`/`step`/`stepHistory`/`progress`/`status` all start
+  // empty: none of that is in a `RunSummary`, only ever arrives by actually
+  // tailing (`startTail` below) — running runs are tailed immediately by
+  // both callers; a finished run's own output is filled in lazily, the
+  // first time the user opens its details page (see `maybeLazyTail`).
+  function recordFromSummary(summary: RunSummary): RunRecord {
+    const startedAt = Date.parse(summary.started_at);
+    const endedAt = summary.ended_at ? Date.parse(summary.ended_at) : null;
+    return {
+      runId: summary.run_id,
+      running: summary.status === "running",
+      lines: [],
+      step: null,
+      stepHistory: [],
+      progress: null,
+      status: null,
+      stopped: summary.status === "stopped",
+      crashed: summary.status === "crashed",
+      exitCode: summary.exit_code,
+      startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
+      endedAt: endedAt !== null && Number.isFinite(endedAt) ? endedAt : null,
+    };
+  }
+
+  // A finished run whose journal summary already says it failed (crashed, or
+  // a nonzero exit) latches the board's red overlay immediately on sight —
+  // same "only failures latch" rule `applyBoardOutcome` enforces for a run
+  // that just finished live (see its doc comment), just entered from disk
+  // instead of from a live `finish()`. Success/stopped are deliberately NOT
+  // resurrected here: those are transient "this just happened" blinks (see
+  // `scheduleOverrideClear`), and a run from history didn't just happen —
+  // showing one anyway would misread as brand new.
+  function latchFailureFromSummary(path: string, commandId: string, summary: RunSummary) {
+    if (summary.status === "crashed" || (summary.status === "exited" && summary.exit_code !== 0)) {
+      setBoardOverride(path, commandId, { kind: "run-failed" });
+    }
+  }
+
+  // Builds the same patch-run/finish/apply-event closures `handleRun` uses
+  // for a run it starts itself, parameterized so hydration/the poll/a lazy
+  // tail can drive an *existing* run_id (not one this call minted) through
+  // the exact same event-to-record mapping — see `applyEvent`'s switch,
+  // which is the one and only place a `RunEvent` becomes a `RunRecord`
+  // patch, whichever of the app's several run-watching paths produced it.
+  function makeRunHandlers(path: string, commandId: string, runId: string) {
+    // Applies `fn` to this run's record iff it's still the record this
+    // invocation is watching (same runId) — events for a run that's been
+    // superseded (a newer run of the same command started) or whose device
+    // was ejected land nowhere.
+    function patchRun(fn: (current: RunRecord) => RunRecord): boolean {
+      const forRepo = runsByRepo[path] ?? {};
+      const current = forRepo[commandId];
+      if (!current || current.runId !== runId) return false;
+      runsByRepo = { ...runsByRepo, [path]: { ...forRepo, [commandId]: fn(current) } };
+      return true;
+    }
+
+    function appendLine(line: OutputLine) {
+      patchRun((current) => ({ ...current, lines: [...current.lines, line] }));
+    }
+
+    function updateRecord(
+      patch: Partial<Pick<RunRecord, "step" | "stepHistory" | "progress" | "status">>,
+    ) {
+      patchRun((current) => ({ ...current, ...patch }));
+    }
+
+    // Terminal states share one summary-line shape (the output module's
+    // final "✓ done in M:SS" / "✗ exited with code N after M:SS" / "■
+    // stopped after M:SS" / "⚠ crashed …" line — see RunView/OutputPane) so
+    // every way a run can end goes through the same bookkeeping.
+    function finish(
+      exitCode: number | null,
+      stopped: boolean,
+      errorText: string | null,
+      crashed: boolean = false,
+    ) {
+      const applied = patchRun((current) => {
+        const dur = formatDuration(Date.now() - current.startedAt);
+        let text: string;
+        let outcome: NonNullable<OutputLine["outcome"]>;
+        if (errorText !== null) {
+          text = errorText;
+          outcome = "error";
+        } else if (crashed) {
+          text = `⚠ crashed — pult stopped without recording an exit (after ${dur})`;
+          outcome = "crashed";
+        } else if (stopped) {
+          text = `■ stopped after ${dur}`;
+          outcome = "stopped";
+        } else if (exitCode === 0) {
+          text = `✓ done in ${dur}`;
+          outcome = "success";
+        } else {
+          text = `✗ exited with code ${exitCode ?? "unknown"} after ${dur}`;
+          outcome = "error";
+        }
+        return {
+          ...current,
+          running: false,
+          stopped,
+          crashed,
+          exitCode,
+          endedAt: Date.now(),
+          lines: [...current.lines, { stream: "exit", text, outcome }],
+        };
+      });
+      if (applied) applyBoardOutcome(path, commandId, { stopped, exitCode, errorText, crashed });
+    }
+
+    function applyEvent(event: RunEvent) {
+      switch (event.kind) {
+        case "line":
+          appendLine({ stream: event.stream, text: event.text });
+          break;
+        case "step":
+          patchRun((current) => {
+            const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
+            return { ...current, step, stepHistory: [...current.stepHistory, step] };
+          });
+          break;
+        case "progress":
+          updateRecord({ progress: { pct: event.pct, text: event.text } });
+          break;
+        case "status":
+          updateRecord({ status: event.text });
+          break;
+        case "exit":
+          finish(event.code, event.stopped, null, event.crashed ?? false);
+          break;
+      }
+    }
+
+    return { patchRun, finish, applyEvent };
+  }
+
+  // Starts (or, if the backend's already tailing this run_id, no-ops into)
+  // watching `runId`'s full backlog-then-live journal tail, registering its
+  // handler in the shared `activeTails` map so the one app-wide subscription
+  // (see `onMount`) routes its events here by run_id.
+  function startTail(path: string, commandId: string, runId: string) {
+    const { applyEvent } = makeRunHandlers(path, commandId, runId);
+    activeTails.set(runId, applyEvent);
+    void tailRun(path, runId);
+  }
+
+  // Lazy-tail hook (docs/run-journal.md's hydration leg): a hydrated/polled
+  // terminal run is seeded from its `RunSummary` alone — no output, since a
+  // summary carries none. The board never renders a finished run's lines
+  // (only its running/lamp state), so the first (and, once tailed, only —
+  // `record.lines.length` guards a repeat visit) moment output is actually
+  // needed is opening that command's details page, which is exactly where
+  // this is called from (`selectCommand`) — eagerly tailing a device's whole
+  // run history on open instead would mean fetching output for commands the
+  // user may never look at again.
+  function maybeLazyTail(commandId: string) {
+    if (!repoPath) return;
+    const path = repoPath;
+    const record = runsByRepo[path]?.[commandId];
+    if (!record || record.running || record.lines.length > 0) return;
+    startTail(path, commandId, record.runId);
+  }
+
+  // Groups `listRuns`'s newest-first result down to each command's single
+  // newest run — the shape both hydration and the poll seed records from.
+  function newestRunPerCommand(summaries: RunSummary[]): Map<string, RunSummary> {
+    const newest = new Map<string, RunSummary>();
+    for (const s of summaries) {
+      if (!newest.has(s.command_id)) newest.set(s.command_id, s);
+    }
+    return newest;
+  }
+
+  // Hydration (docs/run-journal.md's "Desktop app changes when this lands",
+  // item 2): seeds every command's newest journaled run into its record so
+  // runs survive an app restart, then eagerly tails only the ones still
+  // running (a finished run's output is filled in lazily — see
+  // `maybeLazyTail`). Never overwrites a record already present for a
+  // command — `loadRepo` calls this on every switch back to an
+  // already-visited device this session, and the live in-memory record
+  // (whether from a run started this session or an earlier hydration/poll)
+  // is always more authoritative than a fresh disk read.
+  async function hydrateRuns(path: string) {
+    let summaries: RunSummary[];
+    try {
+      summaries = await listRuns(path);
+    } catch (e) {
+      // Run history is a nice-to-have, same posture as `loadDoctor` below —
+      // its absence shouldn't block browsing or starting new runs.
+      console.error(e);
+      return;
+    }
+    if (repoPath !== path) return; // stale-switch guard, same pattern as loadDoctor
+    const newest = newestRunPerCommand(summaries);
+    const forRepo = { ...(runsByRepo[path] ?? {}) };
+    let changed = false;
+    for (const [commandId, summary] of newest) {
+      if (forRepo[commandId]) continue;
+      forRepo[commandId] = recordFromSummary(summary);
+      latchFailureFromSummary(path, commandId, summary);
+      changed = true;
+    }
+    if (changed) runsByRepo = { ...runsByRepo, [path]: forRepo };
+    for (const [commandId, summary] of newest) {
+      if (summary.status === "running") startTail(path, commandId, summary.run_id);
+    }
+  }
+
+  // The CLI-run-visibility poll (docs/run-journal.md's demo consequence of
+  // hydration): while a device is active, keep re-reading its journal so a
+  // run started outside this app window (a real `pult deploy` typed in a
+  // terminal, or another window of this same app) shows up without the user
+  // doing anything. A command's newest run_id differing from what this
+  // session already knows — whether because the command had no record at
+  // all yet or because a fresh run superseded the one we had — means "never
+  // seen before"; a same-run_id record we still believe is running but the
+  // journal no longer does is the crash/missed-exit catch-up path (normally
+  // redundant with the tail's own synthesized exit, but cheap insurance
+  // against ever missing it — `startTail` on an id already being tailed is a
+  // no-op both here and at the backend, so this never double-handles).
+  async function pollRuns(path: string) {
+    let summaries: RunSummary[];
+    try {
+      summaries = await listRuns(path);
+    } catch (e) {
+      console.error(e);
+      return;
+    }
+    if (repoPath !== path || activePollPath !== path) return; // switched/stopped mid-request
+    const newest = newestRunPerCommand(summaries);
+    const forRepo = { ...(runsByRepo[path] ?? {}) };
+    let changed = false;
+    for (const [commandId, summary] of newest) {
+      const current = forRepo[commandId];
+      if (!current || current.runId !== summary.run_id) {
+        forRepo[commandId] = recordFromSummary(summary);
+        latchFailureFromSummary(path, commandId, summary);
+        changed = true;
+        if (summary.status === "running") startTail(path, commandId, summary.run_id);
+      } else if (current.running && summary.status !== "running" && !activeTails.has(current.runId)) {
+        startTail(path, commandId, current.runId);
+      }
+    }
+    if (changed) runsByRepo = { ...runsByRepo, [path]: forRepo };
+  }
+
+  function stopActivePoll() {
+    if (activePollTimer) clearInterval(activePollTimer);
+    activePollTimer = undefined;
+    activePollPath = null;
+  }
+
+  function startPollFor(path: string) {
+    stopActivePoll();
+    activePollPath = path;
+    activePollTimer = setInterval(() => void pollRuns(path), CLI_POLL_MS);
+  }
+
   // Opens (or switches to) the device at `path`. Per-device session state
   // (runsByRepo & co.) deliberately survives this — only the active-listing
   // state resets. The post-await guards handle a device switch racing a slow
   // open: the stale open's listing must never clobber the newer device's.
   async function loadRepo(path: string) {
+    stopActivePoll();
     repoPath = path;
     listingError = null;
     listing = null;
@@ -303,6 +605,8 @@
       persistRack();
       if (repoPath !== path) return;
       listing = result;
+      void hydrateRuns(path);
+      startPollFor(path);
       if (result.trusted) {
         await loadDoctor(path);
       } else if (!readOnlyPaths.has(path)) {
@@ -343,10 +647,14 @@
   }
 
   function handleEjectDevice(path: string) {
-    // Eject = remove: stop anything still running in that device rather
-    // than orphaning child processes nothing will ever look at again.
+    // Eject = unmount, nothing more: the journal leg means a run left going
+    // is no longer an orphan nothing will ever look at again — it's visible
+    // and stoppable from the CLI (or another window), and reappears here via
+    // hydration if this device gets remounted (see `hydrateRuns`). Stopping
+    // it here would be actively wrong now, not just unnecessary.
+    if (activePollPath === path) stopActivePoll();
     for (const run of Object.values(runsByRepo[path] ?? {})) {
-      if (run.running) void stopRun(path, run.runId);
+      activeTails.delete(run.runId);
     }
     for (const [key, t] of [...boardOverrideTimers]) {
       if (key.startsWith(`${path}\0`)) {
@@ -403,6 +711,7 @@
   function selectCommand(id: string) {
     selectedId = id;
     view = "run";
+    maybeLazyTail(id);
   }
 
   function backToBoard() {
@@ -443,6 +752,7 @@
           progress: null,
           status: null,
           stopped: false,
+          crashed: false,
           exitCode: null,
           startedAt: Date.now(),
           endedAt: null,
@@ -450,83 +760,14 @@
       },
     };
 
-    // Applies `fn` to this run's record iff it's still the record this
-    // invocation created (same runId) — events from a superseded or ejected
-    // run land nowhere. Returns whether it applied.
-    function patchRun(fn: (current: RunRecord) => RunRecord): boolean {
-      const forRepo = runsByRepo[path] ?? {};
-      const current = forRepo[commandId];
-      if (!current || current.runId !== runId) return false;
-      runsByRepo = { ...runsByRepo, [path]: { ...forRepo, [commandId]: fn(current) } };
-      return true;
-    }
-
-    function appendLine(line: OutputLine) {
-      patchRun((current) => ({ ...current, lines: [...current.lines, line] }));
-    }
-
-    function updateRecord(patch: Partial<Pick<RunRecord, "step" | "stepHistory" | "progress" | "status">>) {
-      patchRun((current) => ({ ...current, ...patch }));
-    }
-
-    // Terminal states share one summary-line shape (the output module's
-    // final "✓ done in M:SS" / "✗ exited with code N after M:SS" / "■
-    // stopped after M:SS" line — see RunView/OutputPane) so both a clean
-    // exit and an invoke-level failure (network hiccup, backend error —
-    // never a normal process exit) go through the same bookkeeping.
-    function finish(exitCode: number | null, stopped: boolean, errorText: string | null) {
-      const applied = patchRun((current) => {
-        const dur = formatDuration(Date.now() - current.startedAt);
-        let text: string;
-        let outcome: "success" | "error" | "stopped";
-        if (errorText !== null) {
-          text = errorText;
-          outcome = "error";
-        } else if (stopped) {
-          text = `■ stopped after ${dur}`;
-          outcome = "stopped";
-        } else if (exitCode === 0) {
-          text = `✓ done in ${dur}`;
-          outcome = "success";
-        } else {
-          text = `✗ exited with code ${exitCode ?? "unknown"} after ${dur}`;
-          outcome = "error";
-        }
-        return {
-          ...current,
-          running: false,
-          stopped,
-          exitCode,
-          endedAt: Date.now(),
-          lines: [...current.lines, { stream: "exit", text, outcome }],
-        };
-      });
-      if (applied) applyBoardOutcome(path, commandId, { stopped, exitCode, errorText });
-    }
+    // Same patch-run/finish/apply-event closures hydration/the poll/a lazy
+    // tail use for a run they didn't start themselves (see `makeRunHandlers`)
+    // — this is the one place a run_id is actually minted, everything after
+    // that is shared.
+    const { finish, applyEvent } = makeRunHandlers(path, commandId, runId);
 
     try {
-      await runCommand(path, commandId, values, runId, (event: RunEvent) => {
-        switch (event.kind) {
-          case "line":
-            appendLine({ stream: event.stream, text: event.text });
-            break;
-          case "step":
-            patchRun((current) => {
-              const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
-              return { ...current, step, stepHistory: [...current.stepHistory, step] };
-            });
-            break;
-          case "progress":
-            updateRecord({ progress: { pct: event.pct, text: event.text } });
-            break;
-          case "status":
-            updateRecord({ status: event.text });
-            break;
-          case "exit":
-            finish(event.code, event.stopped, null);
-            break;
-        }
-      });
+      await runCommand(path, commandId, values, runId, applyEvent);
     } catch (e) {
       finish(null, false, String(e));
     }
@@ -552,6 +793,23 @@
     showSettings = false;
     await refreshSettingsInfo();
   }
+
+  // The one app-wide `pult://run-output` subscription every tailed run's
+  // events route through by run_id (see `activeTails`'s doc comment) — set
+  // up once, for the app's whole lifetime, independent of which device is
+  // active or mounted at all (a background device's tail keeps delivering
+  // here even while its device sits inactive in the rack).
+  const unsubscribeRunOutput = subscribeRunOutput((event) => {
+    const handler = activeTails.get(event.run_id);
+    if (!handler) return;
+    handler(event);
+    if (event.kind === "exit") activeTails.delete(event.run_id);
+  });
+
+  onDestroy(() => {
+    unsubscribeRunOutput();
+    stopActivePoll();
+  });
 
   onMount(() => {
     const saved = localStorage.getItem("pult-desktop:theme");

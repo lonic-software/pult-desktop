@@ -29,6 +29,7 @@ export const stopRun = backend.stopRun;
 export const resolvePickSource = backend.resolvePickSource;
 export const listRuns = backend.listRuns;
 export const tailRun = backend.tailRun;
+export const subscribeRunOutput = backend.subscribeRunOutput;
 
 // Per-repo param-value persistence (see ./real/paramStore.ts and
 // ./mock/paramStore.ts) — the parameters module's "remembered per repo"

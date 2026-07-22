@@ -91,17 +91,22 @@ export type RunEvent =
        *  pult process was dead (crash detection) — never set on a journaled
        *  `exit` line itself, only synthesized when the tail never observes
        *  one. Additive field: absent/undefined means "not a crash", same as
-       *  `false` (the mock backend never sets it at all). */
+       *  `false` (the mock backend's `runCommand` scripts never set it —
+       *  only its canned crashed-history replay in `tailRun` does, purely to
+       *  demo the crashed-rendering surface). */
       crashed?: boolean;
     };
 
 export interface OutputLine {
   stream: "stdout" | "stderr" | "exit";
   text: string;
-  /** Only set on the `exit` stream's line — which of the three summary forms
+  /** Only set on the `exit` stream's line — which of the four summary forms
    *  it is (see `formatDuration`'s callers in +page.svelte), so renderers
-   *  can color it without re-parsing `text`. */
-  outcome?: "success" | "error" | "stopped";
+   *  can color it without re-parsing `text`. `"crashed"` is its own kind,
+   *  distinct from `"error"` (a normal nonzero exit) — pult's writer never
+   *  recorded an exit at all, reader-derived (see `RunEvent`'s `exit.crashed`
+   *  doc comment below). */
+  outcome?: "success" | "error" | "stopped" | "crashed";
 }
 
 /** One `step` event, timestamped at arrival — the timestamp isn't part of
@@ -124,9 +129,15 @@ export interface StepEvent {
 // `step`/`stepHistory`/`progress`/`status` hold the latest (and, for steps,
 // full history of) events of their kind from the PULT_EVENTS channel —
 // additive alongside `lines`. `stopped` distinguishes a user-requested stop
-// from a natural exit once `running` goes false; `startedAt`/`endedAt` are
-// local wall-clock stamps (not from the backend) used for the details page's
-// "started HH:MM:SS" / "elapsed M:SS" / "total M:SS" display.
+// from a natural exit once `running` goes false; `crashed` is a third,
+// mutually-exclusive-with-`stopped` terminal flavor — pult's writer died
+// without ever journaling an exit (see `RunEvent`'s `exit.crashed` doc
+// comment) — kept as its own field rather than folded into `exitCode` since
+// a crash carries no exit code at all. `startedAt`/`endedAt` come from the
+// journal once hydrated from a `RunSummary` (see +page.svelte's
+// `recordFromSummary`), or are local wall-clock stamps for a run this
+// session itself started — used for the details page's "started HH:MM:SS" /
+// "elapsed M:SS" / "total M:SS" display either way.
 export interface RunRecord {
   runId: string;
   running: boolean;
@@ -136,6 +147,7 @@ export interface RunRecord {
   progress: { pct: number | null; text: string | null } | null;
   status: string | null;
   stopped: boolean;
+  crashed: boolean;
   exitCode: number | null;
   startedAt: number;
   endedAt: number | null;
@@ -146,8 +158,8 @@ export interface RunRecord {
 // first. `status` folds pult-desktop's reader-derived "crashed" detection in
 // alongside the journal's own three writer-written statuses. This is a
 // listing/history shape, not `RunRecord` (the live in-memory run the run
-// view renders) — hydrating a `RunSummary` into a `RunRecord` and tailing it
-// is the next leg's work.
+// view renders) — see +page.svelte's `recordFromSummary` for hydrating one
+// into the other, and `startTail`/`tailRun` for pulling in its actual output.
 export interface RunSummary {
   run_id: string;
   command_id: string;

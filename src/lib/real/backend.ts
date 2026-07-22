@@ -103,3 +103,27 @@ export async function listRuns(path: string): Promise<RunSummary[]> {
 export async function tailRun(path: string, runId: string): Promise<void> {
   await invoke<void>("tail_run", { path, runId });
 }
+
+// One shared subscription to the whole `pult://run-output` channel, for
+// callers that need to watch events across potentially many concurrently-
+// tailed runs (hydration, the CLI-visibility poll, a lazily-tailed finished
+// run) without opening a fresh `listen()` per run the way `runCommand`'s own
+// dedicated one does — see +page.svelte's `activeTails` for the run_id
+// routing this feeds. Returns an unsubscribe function immediately, safe to
+// call even before the underlying `listen()` promise has resolved (the
+// `cancelled` flag makes that a same-tick no-op once it does).
+export function subscribeRunOutput(onEvent: (event: RunEvent) => void): () => void {
+  let unlisten: (() => void) | undefined;
+  let cancelled = false;
+  listen<RunEvent>("pult://run-output", (event) => onEvent(event.payload)).then((un) => {
+    if (cancelled) {
+      un();
+      return;
+    }
+    unlisten = un;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
