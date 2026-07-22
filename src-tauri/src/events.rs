@@ -24,7 +24,10 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PultEvent {
     /// `progress <0-100|?> [text]` — `pct: None` is the indeterminate `?` form.
-    Progress { pct: Option<u8>, text: Option<String> },
+    Progress {
+        pct: Option<u8>,
+        text: Option<String>,
+    },
     /// `status <text>` — a transient activity line; the plain CLI consumes
     /// and drops it, it exists for richer surfaces like this one.
     Status(String),
@@ -54,7 +57,11 @@ pub fn parse(line: &str) -> Option<PultEvent> {
 
 fn parse_progress(rest: &str) -> Option<PultEvent> {
     let (pct_str, text) = split_first(rest);
-    let text = if text.is_empty() { None } else { Some(text.to_string()) };
+    let text = if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    };
     if pct_str == "?" {
         return Some(PultEvent::Progress { pct: None, text });
     }
@@ -122,7 +129,10 @@ mod tests {
     fn parses_indeterminate_progress() {
         assert_eq!(
             parse("progress ?"),
-            Some(PultEvent::Progress { pct: None, text: None })
+            Some(PultEvent::Progress {
+                pct: None,
+                text: None
+            })
         );
         assert_eq!(
             parse("progress ? thinking"),
