@@ -344,6 +344,7 @@
       exitCode: summary.exit_code,
       startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
       endedAt: endedAt !== null && Number.isFinite(endedAt) ? endedAt : null,
+      interactive: summary.interactive,
     };
   }
 
@@ -790,6 +791,10 @@
           exitCode: null,
           startedAt: Date.now(),
           endedAt: null,
+          // The app can never spawn an interactive command (RunView's
+          // `disabledReason` blocks the Run button for one) — always false
+          // for a run started here, see RunRecord's doc comment.
+          interactive: false,
         },
       },
     };

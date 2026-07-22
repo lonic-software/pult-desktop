@@ -280,6 +280,7 @@ const MINUTE = 60_000;
 const HISTORY_EXITED_ID = "mock-history-exited";
 const HISTORY_CRASHED_ID = "mock-history-crashed";
 const HISTORY_STOPPED_ID = "mock-history-stopped";
+const HISTORY_INTERACTIVE_ID = "mock-history-interactive";
 
 // Fixed at module load, not recomputed per call — a stable demo history
 // rather than one that keeps sliding later the longer the app has been
@@ -318,6 +319,22 @@ const HISTORY_RUNS: RunSummary[] = [
     origin: "app",
     interactive: false,
   },
+  // Demos docs/run-journal.md's "Interactive commands" reader rule (see
+  // OutputPane.svelte's `showInteractiveNote`): `origin: "cli"` because the
+  // app itself can never spawn an interactive command (RunView's
+  // `disabledReason` blocks the Run button for one) — this is what hydrating
+  // a real `pult shell` typed in a terminal looks like.
+  {
+    run_id: HISTORY_INTERACTIVE_ID,
+    command_id: "shell",
+    command_title: "Shell",
+    status: "exited",
+    exit_code: 0,
+    started_at: isoAgo(8 * MINUTE),
+    ended_at: isoAgo(7 * MINUTE),
+    origin: "cli",
+    interactive: true,
+  },
 ];
 
 // A few canned lines + a terminal exit per history run — what `tailRun`
@@ -352,6 +369,15 @@ const HISTORY_REPLAY: Record<
       { stream: "stdout", text: "running unit suite…" },
     ],
     exit: { kind: "exit", run_id: HISTORY_STOPPED_ID, code: null, stopped: true },
+  },
+  // No lines — an interactive run's `events.jsonl` legitimately contains
+  // only its `exit` record (docs/run-journal.md), so this is the one replay
+  // in the set with an empty `lines` array; `tailRun` below still replays
+  // the exit event, which composes with OutputPane's placeholder note
+  // rather than replacing it (see OutputPane.svelte's `showInteractiveNote`).
+  [HISTORY_INTERACTIVE_ID]: {
+    lines: [],
+    exit: { kind: "exit", run_id: HISTORY_INTERACTIVE_ID, code: 0, stopped: false },
   },
 };
 

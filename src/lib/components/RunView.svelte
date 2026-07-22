@@ -488,6 +488,7 @@
           lines={run?.lines ?? []}
           running={run?.running ?? false}
           dim={!run?.running && !!run}
+          interactive={run?.interactive ?? false}
         />
       </div>
     </section>

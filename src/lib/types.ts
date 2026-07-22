@@ -137,7 +137,14 @@ export interface StepEvent {
 // journal once hydrated from a `RunSummary` (see +page.svelte's
 // `recordFromSummary`), or are local wall-clock stamps for a run this
 // session itself started — used for the details page's "started HH:MM:SS" /
-// "elapsed M:SS" / "total M:SS" display either way.
+// "elapsed M:SS" / "total M:SS" display either way. `interactive` mirrors
+// the journal's `meta.json` field (see `RunSummary` below) — the terminal
+// owns the tty for these, so `lines` legitimately never gets stdout/stderr
+// entries (docs/run-journal.md, "Interactive commands"); always `false` for
+// a run this app started itself (`handleRun` in +page.svelte), since the app
+// can never spawn an interactive command (RunView's `disabledReason` blocks
+// the Run button for one) — only hydration/the CLI poll ever set it true,
+// from a `RunSummary` a real `pult <interactive-cmd>` in a terminal wrote.
 export interface RunRecord {
   runId: string;
   running: boolean;
@@ -151,6 +158,7 @@ export interface RunRecord {
   exitCode: number | null;
   startedAt: number;
   endedAt: number | null;
+  interactive: boolean;
 }
 
 // One entry in `listRuns`'s result — the run journal's history for a repo

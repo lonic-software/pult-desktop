@@ -18,10 +18,29 @@
      *  stdout/stderr text (the exit summary keeps its outcome color; it's
      *  still the meaningful "how did it end" answer even in replay). */
     dim?: boolean;
+    /** Mirrors `RunRecord.interactive` (docs/run-journal.md, "Interactive
+     *  commands"): the terminal owns the tty, so pult journals meta + exit
+     *  only — `lines` never gets a stdout/stderr entry for one of these,
+     *  live or replayed. Renders an explanatory line in place of what would
+     *  otherwise be a blank-looking pane; see `showInteractiveNote` below. */
+    interactive?: boolean;
   }
 
-  let { lines, running = false, dim = false }: Props = $props();
+  let { lines, running = false, dim = false, interactive = false }: Props = $props();
   let containerEl: HTMLDivElement | undefined = $state();
+
+  // True whenever this is an interactive run and no actual output has (or
+  // ever will have) arrived — which for an interactive run is always, since
+  // the spec guarantees no stdout/stderr lines are ever journaled for one.
+  // The `some` check is defensive rather than load-bearing. Deliberately NOT
+  // folded into a single "lines.length === 0" replacement — a finished
+  // interactive run's `lines` still carries the real journaled exit summary
+  // (see +page.svelte's `finish`), and that line renders below this note,
+  // not instead of it, so the two compose rather than one clobbering the
+  // other.
+  const showInteractiveNote = $derived(
+    interactive && !lines.some((l) => l.stream === "stdout" || l.stream === "stderr"),
+  );
 
   // Auto-scroll to the newest line, but only if the user hasn't scrolled up
   // to read earlier output — otherwise a fast-scrolling run would keep
@@ -46,6 +65,11 @@
 </script>
 
 <div class="output mono pult-screen pult-crt-glow" class:dim bind:this={containerEl} onscroll={onScroll}>
+  {#if showInteractiveNote}
+    <span class="line note">{running
+        ? "running in a terminal — output stays there (interactive command)"
+        : "ran in a terminal — output wasn't captured (interactive command)"}</span>
+  {/if}
   {#each lines as line, i (i)}
     <span class="line {line.stream}" class:outcome-success={line.outcome === "success"} class:outcome-error={line.outcome === "error"} class:outcome-stopped={line.outcome === "stopped"} class:outcome-crashed={line.outcome === "crashed"}
       >{line.text}</span
@@ -93,6 +117,13 @@
 
   .line.stderr {
     color: var(--crt-red, #e88a7a);
+  }
+
+  /* The interactive-run placeholder (see `showInteractiveNote` above) —
+     dimmed like replayed stdout/stderr rather than the ink color, since it's
+     explanatory chrome, not actual command output. */
+  .line.note {
+    color: var(--crt-dim, #5f7563);
   }
 
   .line.exit {
