@@ -26,6 +26,21 @@
 //! never a mix of two generations' events, and never silently missing
 //! everything an old, cancelled tail would have replayed (see
 //! `tail_run`/`TailRegistry::claim`).
+//!
+//! **Where "at most one uncancelled emitter" is actually enforced (fix round
+//! 3):** at a single choke point, `suppress_after_cancel`, wrapping the one
+//! closure `tail_run` hands down through every layer below it
+//! (`tail_run_blocking(_at)`, `tail_existing_run`, `follow_events`,
+//! `wait_for_run_dir_at`'s two failure fallbacks) — not scattered `if
+//! !cancel` checks at each function capable of reaching a terminal emission.
+//! That used to be scattered and still missed a real leak: `follow_events`'s
+//! final-drain terminal branch reads whatever real event the writer just
+//! appended (`exit` included) and hands it to `emit` unconditionally, with
+//! no cancel check of its own (by design — see its doc comment) — the event
+//! is already delivered by the time any check further down the call stack
+//! could run. Wrapping the one closure at the top, once, is what closes that
+//! gap: nothing downstream needs its own guard anymore, because nothing
+//! downstream is the last stop before delivery.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -302,17 +317,23 @@ pub fn list_runs(repo_path: &str) -> Vec<RunSummary> {
 /// view they're indistinguishable: there is nothing left to stop.
 const RUN_ALREADY_FINISHED: &str = "That run has already finished or was never journaled.";
 
-/// Whether `meta` describes a run that's actually live and stoppable right
-/// now — a `Running` status backed by a live writer. Factored out from
-/// `stop_run` (fix round 2, point fix C, closing the stale-pgid signal) so
-/// the precheck is unit-testable without a filesystem, a repo dir, or
-/// `PULT_STATE_DIR` at all: a `pgid` is only ever meaningful while its
-/// writer is the live owner of that process group — once the writer's gone,
-/// the OS is free to have recycled the same pgid for an unrelated process
-/// tree, so signaling it is not "harmlessly do nothing" but "maybe kill
-/// something that has nothing to do with this run."
+/// Whether `meta` describes a run that's stoppable right now. Fix round 3
+/// dropped the `writer_alive` conjunct fix round 2 added here: every
+/// UI-reachable stop targets a record the frontend is rendering as
+/// `running: true`, and for that record `meta.status` is either genuinely
+/// `Running` — in which case signaling it is correct, INCLUDING the window
+/// where the writer has just died but its children are still alive (the old
+/// conjunct wrongly refused to stop those, since it read the writer alone as
+/// gospel for the whole process group) — or already terminal, which this
+/// `Status::Running` check alone still refuses exactly as before. The
+/// stale-pgid hazard the old conjunct guarded against (a long-dead run whose
+/// `pgid` the OS has since recycled for something unrelated) is unreachable
+/// from the UI in the first place: a meta that's been `Running`-but-dead
+/// long enough for pgid recycling to be a real risk is never still being
+/// rendered `running: true` by the frontend by the time a user can click
+/// Stop on it.
 fn is_stoppable(meta: &RunMeta) -> bool {
-    meta.status == Status::Running && writer_alive(meta.pid)
+    meta.status == Status::Running
 }
 
 /// Stop a journaled run by its `pgid` — works identically for a run this app
@@ -320,10 +341,9 @@ fn is_stoppable(meta: &RunMeta) -> bool {
 /// in-process registry. `SIGTERM` to the whole group, a grace period, then
 /// `SIGKILL` if the writer is still alive.
 ///
-/// Precheck (fix round 2, point fix C — see `is_stoppable`): bails out with
-/// the same not-running error `read_meta`'s absence already uses, rather
-/// than ever calling `signal_group` against a meta that isn't both
-/// `Running` and backed by a live writer.
+/// Precheck (see `is_stoppable`): bails out with the same not-running error
+/// `read_meta`'s absence already uses, rather than ever calling
+/// `signal_group` against a meta that isn't `Running`.
 #[cfg(unix)]
 pub async fn stop_run(repo_path: &str, run_id: &str) -> Result<(), String> {
     let run_dir = run_dir_for(repo_path, run_id)?;
@@ -567,11 +587,18 @@ fn synthesize_exit(run_id: &str, meta: Option<&RunMeta>) -> RunEvent {
 /// Assumes `run_dir` and its `events.jsonl` already exist; callers waiting
 /// out the spawn race go through `wait_for_run_dir_at` first.
 ///
-/// `cancel` (fix round 2 — see `TailRegistry`): checked before doing
-/// anything, and again right after `follow_events` returns, in both cases
-/// short-circuiting *without* emitting a synthesized exit — a cancelled
-/// tail must never emit a terminal event at all, since the replacement tail
-/// that cancelled it now owns this run_id and is the only one entitled to.
+/// `cancel` (fix round 2 — see `TailRegistry`): checked once at entry, purely
+/// to skip opening the file at all when this tail was already cancelled
+/// before it ever got a turn to run — work avoidance, not an emission guard.
+/// This function no longer guards its own emissions against `cancel` (fix
+/// round 3 removed the per-site `if !cancel` checks that used to sit right
+/// before each of the two synthesized-exit fallbacks below): "a cancelled
+/// tail must never emit a terminal event" is now enforced once, structurally,
+/// at the single choke point every caller's `emit` is wrapped in
+/// (`suppress_after_cancel`, applied in `tail_run`) — see that function's doc
+/// comment for why scattering the check here as well can't actually close
+/// the gap that matters (a real journaled event `follow_events`'s own final
+/// drain reads and hands to `emit` before any check downstream could run).
 fn tail_existing_run(
     run_dir: &Path,
     run_id: &str,
@@ -584,9 +611,7 @@ fn tail_existing_run(
     let mut file = match std::fs::File::open(run_dir.join("events.jsonl")) {
         Ok(f) => f,
         Err(_) => {
-            if !cancel.load(Ordering::SeqCst) {
-                emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
-            }
+            emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
             return;
         }
     };
@@ -611,9 +636,6 @@ fn tail_existing_run(
         // terminal as any other "nothing more is coming" state.
         saw_exit = false;
     }
-    if cancel.load(Ordering::SeqCst) {
-        return;
-    }
     if !saw_exit {
         emit(synthesize_exit(run_id, read_meta(run_dir).as_ref()));
     }
@@ -634,7 +656,10 @@ enum WaitForRunDir {
     /// The spawned child was already dead (per `SpawnOutcomes`) and the run
     /// dir still hadn't appeared after `SPAWN_FAILURE_GRACE` — a pre-journal
     /// spawn failure (bad command id, bad flag, …) whose real diagnostics
-    /// this reader can now report instead of the generic fallback text.
+    /// this reader can now report instead of the generic fallback text. Not
+    /// necessarily a *nonzero* exit — see `emit_spawn_outcome`, which routes
+    /// an `exit_code: Some(0)` here to the "never journaled" guidance instead
+    /// of painting it as success (fix round 3).
     SpawnFailed {
         exit_code: Option<i32>,
         stderr_tail: Vec<String>,
@@ -726,6 +751,9 @@ fn emit_never_journaled(run_id: &str, mut emit: impl FnMut(RunEvent)) {
 /// `emit_never_journaled`'s generic "pult never journaled this run" text,
 /// which used to be the only fallback here regardless of whether pult
 /// crashed instantly with a clear diagnostic or genuinely never ran at all.
+/// Only ever called for a genuinely nonzero (or unknown) exit code — see
+/// `emit_spawn_outcome`, the actual `WaitForRunDir::SpawnFailed` call site,
+/// for the exit-0 case this must NOT be used for.
 fn emit_spawn_failure(
     run_id: &str,
     exit_code: Option<i32>,
@@ -749,6 +777,39 @@ fn emit_spawn_failure(
     });
 }
 
+/// Routes a `WaitForRunDir::SpawnFailed` outcome to the right rendering (fix
+/// round 3): a genuinely nonzero (or unknown) exit code is a real,
+/// actionable failure — `emit_spawn_failure`'s real-stderr/real-exit-code
+/// path is correct as is. But `exit_code: Some(0)` is NOT success: the run
+/// dir never appeared, so pult never journaled anything — a clean exit
+/// without a run dir means pult exited before (or without) doing the work
+/// `--run-id` asked it to journal (e.g. a too-old binary that recognizes the
+/// command but silently ignores a flag it doesn't understand), and painting
+/// that as "✓ done" would be actively misleading. This reroutes to
+/// `emit_never_journaled`'s actionable guidance instead — but leads with
+/// whatever real stderr the child actually wrote first, if any (real output
+/// beats none), rather than discarding it.
+fn emit_spawn_outcome(
+    run_id: &str,
+    exit_code: Option<i32>,
+    stderr_tail: &[String],
+    mut emit: impl FnMut(RunEvent),
+) {
+    if exit_code == Some(0) {
+        for line in stderr_tail {
+            emit(RunEvent::Line {
+                run_id: run_id.to_string(),
+                stream: "stderr".to_string(),
+                text: line.clone(),
+                tail_gen: None,
+            });
+        }
+        emit_never_journaled(run_id, emit);
+    } else {
+        emit_spawn_failure(run_id, exit_code, stderr_tail, emit);
+    }
+}
+
 /// The blocking core of a tail, seamed on an explicit state dir: waits out
 /// the spawn race, then tails to completion (`tail_existing_run`), or — if
 /// pult never journaled this run at all — emits the "never journaled"
@@ -756,8 +817,12 @@ fn emit_spawn_failure(
 /// failed — emits the captured real stderr/exit instead (see
 /// `WaitForRunDir`). Directly unit-testable with tempdir fixtures;
 /// `tail_run_blocking` below is the real-env-reading wrapper `tail_run`
-/// actually calls. `cancel` is threaded all the way through so a restart mid-wait
-/// (fix round 2) never lets this emit anything at all on the way out.
+/// actually calls. `cancel` is threaded all the way through to
+/// `wait_for_run_dir_at`/`tail_existing_run` for their own work-avoidance
+/// checks, but this function no longer guards its own emissions with it (fix
+/// round 3 removed the per-site `if !cancel` checks that used to wrap each of
+/// the three arms below) — that's the single choke point's job now (see
+/// `suppress_after_cancel`, applied in `tail_run`).
 #[allow(clippy::too_many_arguments)]
 fn tail_run_blocking_at(
     state: &Path,
@@ -771,19 +836,11 @@ fn tail_run_blocking_at(
 ) {
     match wait_for_run_dir_at(state, repo_path, run_id, timeout, poll, outcomes, cancel) {
         WaitForRunDir::Found(run_dir) => tail_existing_run(&run_dir, run_id, cancel, emit),
-        WaitForRunDir::NeverJournaled => {
-            if !cancel.load(Ordering::SeqCst) {
-                emit_never_journaled(run_id, emit);
-            }
-        }
+        WaitForRunDir::NeverJournaled => emit_never_journaled(run_id, emit),
         WaitForRunDir::SpawnFailed {
             exit_code,
             stderr_tail,
-        } => {
-            if !cancel.load(Ordering::SeqCst) {
-                emit_spawn_failure(run_id, exit_code, &stderr_tail, emit);
-            }
-        }
+        } => emit_spawn_outcome(run_id, exit_code, &stderr_tail, emit),
         WaitForRunDir::Cancelled => {}
     }
 }
@@ -809,11 +866,7 @@ fn tail_run_blocking(
             cancel,
             emit,
         ),
-        None => {
-            if !cancel.load(Ordering::SeqCst) {
-                emit_never_journaled(run_id, emit);
-            }
-        }
+        None => emit_never_journaled(run_id, emit),
     }
 }
 
@@ -963,6 +1016,35 @@ impl TailRegistry {
     }
 }
 
+/// The one choke point where a cancelled tail's emission is suppressed (fix
+/// round 3, closing the leak at what was journal.rs:524 — `follow_events`'s
+/// final-drain terminal branch, which drains and hands a REAL journaled
+/// event, `Exit` included, to `emit` unconditionally, with no cancel check of
+/// its own: by the time any check further down the call stack could run, the
+/// event has already been delivered to whatever `emit` closure was passed
+/// in, so nothing past that point can un-deliver it). Wrapping the ONE
+/// closure every path (`tail_existing_run`'s backlog/live replay and its
+/// synthesized-exit fallback, both `WaitForRunDir` failure arms) ultimately
+/// funnels its emissions through is what makes "a cancelled tail never
+/// emits" structural rather than a property every call site has to
+/// separately remember to uphold — this replaces the seven scattered
+/// `if !cancel` guards that direct callers used to need around each of their
+/// own emit calls (removed at their call sites below; the loop-level cancel
+/// checks in `follow_events` and `wait_for_run_dir_at` stay — they exist to
+/// avoid pointless further work once cancelled, a different concern from
+/// emission suppression).
+fn suppress_after_cancel(
+    cancel: Arc<AtomicBool>,
+    mut emit: impl FnMut(RunEvent),
+) -> impl FnMut(RunEvent) {
+    move |event| {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        emit(event);
+    }
+}
+
 /// Start tailing `run_id`'s journal in `repo_path`, emitting mapped events
 /// (each stamped with this tail's generation — see `RunEvent::stamp_tail_gen`)
 /// on the `pult://run-output` channel as a background task. **Always**
@@ -1021,15 +1103,16 @@ pub fn tail_run<R: tauri::Runtime>(
         let emit_app = app.clone();
         let blocking_repo_path = repo_path.clone();
         let blocking_run_id = run_id.clone();
+        let cancel_for_wait = cancel.clone();
         let _ = tauri::async_runtime::spawn_blocking(move || {
             tail_run_blocking(
                 &blocking_repo_path,
                 &blocking_run_id,
                 &outcomes,
-                &cancel,
-                move |event| {
+                &cancel_for_wait,
+                suppress_after_cancel(cancel, move |event| {
                     let _ = emit_app.emit("pult://run-output", event.stamp_tail_gen(generation));
-                },
+                }),
             );
         })
         .await;
@@ -1192,27 +1275,23 @@ mod tests {
         );
     }
 
-    // --- stop_run's precheck (fix round 2, point fix C) ---------------------
+    // --- stop_run's precheck (fix round 3 rebalance) ------------------------
     //
     // `is_stoppable` is the pure decision `stop_run` bails out on *before*
     // ever calling `signal_group` — by the source's own control flow,
     // `signal_group` is unreachable whenever this returns `false` (the `if
     // !is_stoppable(&meta) { return Err(...) }` guard is strictly before
-    // it), so these three cases alone establish "never signals" for the
-    // scenarios stop_run's own doc comment calls out (a terminal status, and
-    // a `Running` status whose writer is actually dead — the stale-pgid
-    // case this fix closes). Testing the pure predicate directly avoids
-    // `stop_run` itself needing a real `PULT_STATE_DIR`/filesystem/async
-    // runtime for what's fundamentally a synchronous decision over a
-    // `RunMeta` already in hand — a case picked up again in
-    // `real_pult_e2e` below, which touches `stop_run` itself against a real,
-    // already-finished journaled run. Revert-check: removing the
-    // `is_stoppable` guard from `stop_run` (calling `signal_group`
-    // unconditionally) doesn't change these three tests' outcomes since
-    // they test the predicate in isolation — the revert-check that actually
-    // matters is the e2e assertion below, which goes red without the guard
-    // (stop_run would return `Ok(())` for an already-finished run instead of
-    // the finished error).
+    // it). Testing the pure predicate directly avoids `stop_run` itself
+    // needing a real `PULT_STATE_DIR`/filesystem/async runtime for what's
+    // fundamentally a synchronous decision over a `RunMeta` already in hand —
+    // a case picked up again in `real_pult_e2e` below, which touches
+    // `stop_run` itself against a real, already-finished journaled run.
+    // Revert-check: removing the `is_stoppable` guard from `stop_run`
+    // (calling `signal_group` unconditionally) doesn't change these tests'
+    // outcomes since they test the predicate in isolation — the
+    // revert-check that actually matters is the e2e assertion below, which
+    // goes red without the guard (stop_run would return `Ok(())` for an
+    // already-finished run instead of the finished error).
     #[test]
     fn is_stoppable_is_false_for_a_terminal_status() {
         assert!(!is_stoppable(&sample_meta("r1", Status::Exited)));
@@ -1220,14 +1299,20 @@ mod tests {
     }
 
     #[test]
-    fn is_stoppable_is_false_for_a_running_status_with_a_dead_writer() {
-        // The exact stale-pgid scenario this fix closes: `meta.json` still
-        // says `Running` (the writer never got to record otherwise — a
-        // crash), so without this precheck `stop_run` would happily signal
-        // a pgid the OS may have long since recycled for something else.
+    fn is_stoppable_is_true_for_a_running_status_even_with_a_dead_writer() {
+        // Fix round 3 dropped the `writer_alive` conjunct fix round 2 added:
+        // every UI-reachable stop targets a record rendering `running:
+        // true`, so a `Running` meta here is either genuinely live (signal
+        // is correct) or in the writer-just-died-but-children-still-alive
+        // window — which the old conjunct wrongly refused to stop at all.
+        // The stale-pgid hazard the old conjunct guarded against is
+        // unreachable from the UI (see `is_stoppable`'s doc comment): a meta
+        // stuck `Running`-but-dead long enough for pgid recycling to be a
+        // real risk is never still rendered `running: true` by the frontend
+        // by the time a user could click Stop on it.
         let mut meta = sample_meta("r1", Status::Running);
         meta.pid = DEAD_PID;
-        assert!(!is_stoppable(&meta));
+        assert!(is_stoppable(&meta));
     }
 
     #[test]
@@ -1673,7 +1758,13 @@ mod tests {
     fn tail_existing_run_never_emits_a_synthesized_exit_once_cancelled() {
         // A still-running writer whose tail gets cancelled mid-follow must
         // wind down silently — the replacement tail that cancelled it owns
-        // this run_id's terminal emission now, not this one.
+        // this run_id's terminal emission now, not this one. Fix round 3:
+        // `tail_existing_run` no longer self-guards its emissions against
+        // `cancel` (that's now the choke point's job — see
+        // `suppress_after_cancel`), so this test wraps its own recording
+        // closure with the very same wrapper `tail_run` uses in production,
+        // exercising the actual mechanism rather than a since-removed
+        // internal check.
         let dir = tempfile::tempdir().unwrap();
         let mut meta = sample_meta("cancelled-run", Status::Running);
         meta.pid = std::process::id(); // alive, so the follow loop actually polls
@@ -1686,13 +1777,19 @@ mod tests {
 
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_thread = cancel.clone();
+        let cancel_for_emit = cancel.clone();
         let dir_path = dir.path().to_path_buf();
         let emitted: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let emitted_for_thread = emitted.clone();
         let thread = std::thread::spawn(move || {
-            tail_existing_run(&dir_path, "cancelled-run", &cancel_for_thread, |e| {
-                emitted_for_thread.lock().unwrap().push(e)
-            });
+            tail_existing_run(
+                &dir_path,
+                "cancelled-run",
+                &cancel_for_thread,
+                suppress_after_cancel(cancel_for_emit, move |e| {
+                    emitted_for_thread.lock().unwrap().push(e)
+                }),
+            );
         });
 
         // Let it replay the one backlog line and settle into its poll loop,
@@ -1709,6 +1806,74 @@ mod tests {
         assert!(
             !emitted.iter().any(|e| matches!(e, RunEvent::Exit { .. })),
             "a cancelled tail must never emit its synthesized exit: {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn choke_point_suppresses_a_real_exit_read_in_follow_events_final_drain_after_cancel() {
+        // Pins fix round 3's actual production leak (formerly journal.rs:524
+        // — `follow_events`'s `_ =>` final-drain arm): a real journaled Exit
+        // line, written exactly as the writer finishes, is drained and
+        // handed to `emit` unconditionally by that branch — nothing guards
+        // it there, by design (`follow_events` only checks `cancel` between
+        // drain passes and right after `sleep()`, for prompt exit — see its
+        // doc comment — never inside the final-drain arm itself). The ONLY
+        // thing that can stop that real Exit from reaching the frontend once
+        // this generation has been cancelled is the emit-time wrapper every
+        // event is funneled through in production (`suppress_after_cancel`).
+        //
+        // REVERT-CHECK: replace `suppress_after_cancel(cancel.clone(), ...)`
+        // below with the raw recording closure (bypassing the wrapper) and
+        // this test goes red — the real Exit event lands in `emitted`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let mut file = std::fs::File::open(&path).unwrap();
+        let mut offset = 0u64;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let emitted: Arc<Mutex<Vec<RunEvent>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let meta = sample_meta("r1", Status::Exited);
+        let mut appended = false;
+        let path_for_closure = path.clone();
+        let cancel_for_observe = cancel.clone();
+        let observe = move || {
+            if !appended {
+                appended = true;
+                // The writer appends its real exit line and finishes exactly
+                // as a concurrent claim() cancels this tail — the exact race
+                // `follow_events`'s final-drain arm does not itself guard.
+                append_line(
+                    &path_for_closure,
+                    r#"{"ts":2,"kind":"exit","code":0,"stopped":false}"#,
+                );
+                cancel_for_observe.store(true, Ordering::SeqCst);
+            }
+            Some(meta.clone())
+        };
+
+        let emitted_for_wrapped = emitted.clone();
+        let mut wrapped = suppress_after_cancel(cancel.clone(), move |e| {
+            emitted_for_wrapped.lock().unwrap().push(e)
+        });
+
+        follow_events(
+            &mut file,
+            &mut offset,
+            "r1",
+            &mut wrapped,
+            observe,
+            || panic!("must not sleep: observe() reports terminal on the first call"),
+            &cancel,
+        )
+        .unwrap();
+
+        let emitted = emitted.lock().unwrap();
+        assert!(
+            emitted.iter().all(|e| !matches!(e, RunEvent::Exit { .. })),
+            "a cancelled tail must never let a real journaled Exit reach the frontend, even one \
+             read by follow_events' final-drain terminal branch: {emitted:?}"
         );
     }
 
@@ -1798,6 +1963,97 @@ mod tests {
             other => {
                 panic!("expected a captured spawn failure, got a different outcome: {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn tail_run_blocking_at_renders_guidance_not_success_for_an_exit_0_spawn_that_never_journaled()
+    {
+        // Fix round 3: a child that exits 0 without ever creating a run dir
+        // isn't a success — the frontend must render the "never journaled"
+        // guidance, not a clean "✓ done". Nonzero exits are unaffected (see
+        // `tail_run_blocking_at_reports_a_nonzero_spawn_failures_real_diagnostics`
+        // below).
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let outcomes = SpawnOutcomes::new();
+        outcomes.record(
+            "exit-0-no-journal",
+            Some(0),
+            vec!["warning: --run-id is not a recognized flag on this build".to_string()],
+        );
+
+        let mut emitted = Vec::new();
+        tail_run_blocking_at(
+            state.path(),
+            &repo_path,
+            "exit-0-no-journal",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            &outcomes,
+            &AtomicBool::new(false),
+            |e| emitted.push(e),
+        );
+
+        assert!(
+            !emitted
+                .iter()
+                .any(|e| matches!(e, RunEvent::Exit { code: Some(0), .. })),
+            "an exit-0-without-journal must never render as a clean success: {emitted:?}"
+        );
+        // Real stderr the child actually wrote comes first — real output
+        // beats none.
+        assert!(
+            matches!(&emitted[0], RunEvent::Line { text, .. } if text.contains("--run-id is not a recognized flag")),
+            "captured stderr must lead, before the generic guidance line: {emitted:?}"
+        );
+        assert!(
+            emitted
+                .iter()
+                .any(|e| matches!(e, RunEvent::Line { text, .. } if text.contains("never journaled this run"))),
+            "must still render the actionable guidance: {emitted:?}"
+        );
+        match emitted.last() {
+            Some(RunEvent::Exit { code: None, .. }) => {}
+            other => panic!("expected the never-journaled fallback's Exit, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tail_run_blocking_at_reports_a_nonzero_spawn_failures_real_diagnostics() {
+        // A genuinely nonzero exit code keeps the real-stderr path — only
+        // exit-0 gets rerouted to the "never journaled" guidance.
+        let state = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let repo_path = repo.path().to_string_lossy().to_string();
+
+        let outcomes = SpawnOutcomes::new();
+        outcomes.record(
+            "nonzero-spawn-failure",
+            Some(2),
+            vec!["error: unrecognized subcommand 'bogus'".to_string()],
+        );
+
+        let mut emitted = Vec::new();
+        tail_run_blocking_at(
+            state.path(),
+            &repo_path,
+            "nonzero-spawn-failure",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            &outcomes,
+            &AtomicBool::new(false),
+            |e| emitted.push(e),
+        );
+
+        assert!(
+            matches!(&emitted[0], RunEvent::Line { text, .. } if text == "error: unrecognized subcommand 'bogus'")
+        );
+        match emitted.last() {
+            Some(RunEvent::Exit { code: Some(2), .. }) => {}
+            other => panic!("expected the real captured exit code, got: {other:?}"),
         }
     }
 
@@ -1992,6 +2248,12 @@ mod tests {
             run_id: run_id.to_string(),
             tail_gen: generation,
         });
+        // Mirrors `tail_run`'s own choke-point wrapping exactly (fix round
+        // 3) — this helper's whole point is being a faithful test-only
+        // stand-in for `tail_run`'s sequence, so it must suppress emission
+        // after cancellation the same way, not rely on a per-site check
+        // further down that no longer exists.
+        let cancel_for_emit = cancel.clone();
         tail_run_blocking_at(
             state,
             repo_path,
@@ -2000,7 +2262,9 @@ mod tests {
             poll,
             outcomes,
             &cancel,
-            |event| emit(event.stamp_tail_gen(generation)),
+            suppress_after_cancel(cancel_for_emit, move |event| {
+                emit(event.stamp_tail_gen(generation))
+            }),
         );
         registry.release(run_id, generation);
     }
