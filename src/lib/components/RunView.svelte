@@ -229,11 +229,18 @@
     if (prevRunning && !running) {
       finishedDuringVisit = true;
       if (towerBlinkTimer) clearTimeout(towerBlinkTimer);
-      const kind: TowerBlinkOverride["kind"] = run?.stopped
-        ? "run-stopped"
-        : run?.exitCode === 0
-          ? "success"
-          : "run-failed";
+      // Crashed is checked first, but is mutually exclusive with `stopped`
+      // by construction anyway (see RunRecord's `crashed` doc comment) —
+      // either way it gets the tower's ordinary failure blink, same
+      // red-family treatment as any other failed run (see tower.ts's doc
+      // comment on why there's no separate crashed blink kind).
+      const kind: TowerBlinkOverride["kind"] = run?.crashed
+        ? "run-failed"
+        : run?.stopped
+          ? "run-stopped"
+          : run?.exitCode === 0
+            ? "success"
+            : "run-failed";
       const count =
         kind === "success"
           ? SUCCESS_BLINK_COUNT
@@ -286,11 +293,18 @@
     if (run.running) return `started ${formatClock(run.startedAt)}`;
     if (!run.endedAt) return null;
     if (finishedDuringVisit) {
+      if (run.crashed) return `crashed ${formatClock(run.endedAt)}`;
       return run.stopped
         ? `stopped ${formatClock(run.endedAt)}`
         : `finished ${formatClock(run.endedAt)}`;
     }
-    const outcome = run.stopped ? "stopped" : run.exitCode === 0 ? "passed" : "failed";
+    const outcome = run.crashed
+      ? "crashed"
+      : run.stopped
+        ? "stopped"
+        : run.exitCode === 0
+          ? "passed"
+          : "failed";
     return `last run ${formatRelative(run.endedAt, nowTick)} · ${outcome}`;
   });
 

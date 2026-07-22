@@ -2,10 +2,12 @@
   interface OutputLine {
     stream: "stdout" | "stderr" | "exit";
     text: string;
-    /** Only set on the `exit` stream's line — which of the three summary
+    /** Only set on the `exit` stream's line — which of the four summary
      *  forms it is, so the caller (RunView) doesn't have to re-derive it
-     *  from text. Colors the line; see the `.exit` rules below. */
-    outcome?: "success" | "error" | "stopped";
+     *  from text. Colors the line; see the `.exit` rules below. `"crashed"`
+     *  gets the same red as `"error"` (see `.outcome-crashed` below) — the
+     *  distinction is in the wording, not the color. */
+    outcome?: "success" | "error" | "stopped" | "crashed";
   }
 
   interface Props {
@@ -45,7 +47,7 @@
 
 <div class="output mono pult-screen pult-crt-glow" class:dim bind:this={containerEl} onscroll={onScroll}>
   {#each lines as line, i (i)}
-    <span class="line {line.stream}" class:outcome-success={line.outcome === "success"} class:outcome-error={line.outcome === "error"} class:outcome-stopped={line.outcome === "stopped"}
+    <span class="line {line.stream}" class:outcome-success={line.outcome === "success"} class:outcome-error={line.outcome === "error"} class:outcome-stopped={line.outcome === "stopped"} class:outcome-crashed={line.outcome === "crashed"}
       >{line.text}</span
     >
   {/each}
@@ -113,6 +115,14 @@
 
   .line.exit.outcome-stopped {
     color: var(--crt-amber, #e0c274);
+    border-top-color: transparent;
+  }
+
+  /* Same red as a plain nonzero-exit error — a crash's honest copy is what
+     sets it apart (see +page.svelte's `finish`), not a separate color; both
+     are the same "this run did not end well" red-family verdict. */
+  .line.exit.outcome-crashed {
+    color: var(--crt-red, #e88a7a);
     border-top-color: transparent;
   }
 
