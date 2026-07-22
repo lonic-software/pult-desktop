@@ -141,6 +141,14 @@ fn sidecar_candidate() -> Option<PathBuf> {
 /// Run `pult <args>` in `dir`, optionally feeding `stdin_data`, and capture
 /// the whole output. Used for the non-streaming commands (listing, trust,
 /// doctor, version) where we just need one parsed result.
+///
+/// Deliberately does *not* scrub an inherited `PULT_EVENTS` (contrast
+/// `spawn_run`, which must): none of `run_capture`'s callers ever ask pult
+/// to execute a manifest command — `--list`/`--trust`/`doctor`/`--version`
+/// never reach the tui repo's `exec.rs`/`runner.rs` (the only place a
+/// spawned pult reads `$PULT_EVENTS`), `doctor`'s `check:` scripts run via a
+/// plain unguarded `sh` with no events machinery at all. An inherited value
+/// here is simply never consulted, so there is nothing to starve.
 pub async fn run_capture(
     bin: &PathBuf,
     dir: &str,
@@ -333,6 +341,14 @@ fn shell_quote(value: &str) -> String {
 /// bounded by [`RESOLVE_TIMEOUT`] and [`RESOLVE_MAX_OUTPUT_BYTES`]. Never
 /// panics: every failure mode (spawn error, timeout, non-zero exit, empty
 /// output) becomes a typed `Err` string for the UI.
+///
+/// Also deliberately does not scrub `PULT_EVENTS`, same reasoning as
+/// `run_capture` above but one step further removed: this spawns `sh`, not
+/// `pult`, at all — there's no pult process here to starve of its channel
+/// in the first place. (A manifest `pick.source` script that itself shells
+/// out to `pult` would inherit whatever this process's environment has,
+/// same as any other env var reaching manifest-authored code — no different
+/// a case than a `check:` script, out of scope here.)
 async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -438,6 +454,20 @@ pub async fn spawn_run(
         .arg(run_id)
         .current_dir(dir)
         .env("PULT_ORIGIN", "desktop")
+        // Scrub any inherited `PULT_EVENTS`: this app is very often itself
+        // launched from inside a running `pult` command (the exact `pult
+        // dev` workflow docs/run-journal.md is written for), which sets
+        // `PULT_EVENTS=<fd>` in *our* environment and, since pult clears
+        // CLOEXEC on that fd (tui repo's runner.rs `wire_up_own_fd`), leaves
+        // both the fd and the var alive down the whole process tree. Left
+        // alone, the spawned pult would see a channel already claimed and
+        // honor the documented passthrough rule (docs/run-journal.md,
+        // "Interaction with PULT_EVENTS") — creating no pipe of its own and
+        // journaling no step/progress/status for this run at all, silently,
+        // for every run this app ever spawns from within one. Removing the
+        // var here is what lets the spawned pult claim its own channel and
+        // journal normally, exactly as if launched fresh from a shell.
+        .env_remove("PULT_EVENTS")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
