@@ -186,16 +186,41 @@ export async function stopRun(_path: string, runId: string): Promise<void> {
   stoppedRuns.add(runId);
 }
 
-// The real hydration UI (listing + tailing a repo's journal history) is the
-// next leg's work — these are minimal stand-ins so VITE_MOCK still runs:
-// no journal exists in mock mode, so there's simply no history to list, and
-// nothing to tail (the mock's `runCommand` above already drives its own
-// scripted events directly).
-export async function listRuns(_path: string): Promise<RunSummary[]> {
-  return [];
+// Drives one script's actions into `emit`, checking `stoppedRuns` before
+// each — the one place both `runCommand` (a fresh in-app run) and `tailRun`
+// (the scripted "CLI-started" run, see below) turn a `MockScript` into
+// actual `RunEvent`s, so the two paths can't drift out of sync with each
+// other's pacing/stop-handling.
+async function driveScript(
+  script: MockScript,
+  runId: string,
+  emit: (event: RunEvent) => void,
+): Promise<void> {
+  for (const action of script.actions) {
+    await delay(action.delay);
+    if (stoppedRuns.has(runId)) {
+      stoppedRuns.delete(runId);
+      emit({ kind: "exit", run_id: runId, code: null, stopped: true });
+      return;
+    }
+    switch (action.kind) {
+      case "line":
+        emit({ kind: "line", run_id: runId, stream: action.stream, text: action.text });
+        break;
+      case "step":
+        emit({ kind: "step", run_id: runId, k: action.k, n: action.n, name: action.name });
+        break;
+      case "progress":
+        emit({ kind: "progress", run_id: runId, pct: action.pct, text: action.text ?? null });
+        break;
+      case "status":
+        emit({ kind: "status", run_id: runId, text: action.text });
+        break;
+    }
+  }
+  await delay(120);
+  emit({ kind: "exit", run_id: runId, code: script.exitCode, stopped: false });
 }
-
-export async function tailRun(_path: string, _runId: string): Promise<void> {}
 
 export async function runCommand(
   _path: string,
@@ -205,28 +230,195 @@ export async function runCommand(
   onEvent: (event: RunEvent) => void,
 ): Promise<void> {
   const script = MOCK_SCRIPTS[id] ?? DEFAULT_SCRIPT;
-  for (const action of script.actions) {
-    await delay(action.delay);
-    if (stoppedRuns.has(runId)) {
-      stoppedRuns.delete(runId);
-      onEvent({ kind: "exit", run_id: runId, code: null, stopped: true });
-      return;
-    }
-    switch (action.kind) {
-      case "line":
-        onEvent({ kind: "line", run_id: runId, stream: action.stream, text: action.text });
-        break;
-      case "step":
-        onEvent({ kind: "step", run_id: runId, k: action.k, n: action.n, name: action.name });
-        break;
-      case "progress":
-        onEvent({ kind: "progress", run_id: runId, pct: action.pct, text: action.text ?? null });
-        break;
-      case "status":
-        onEvent({ kind: "status", run_id: runId, text: action.text });
-        break;
-    }
+  return driveScript(script, runId, onEvent);
+}
+
+// --- Journal-reader demo surface -----------------------------------------
+//
+// The real backend's `listRuns`/`tailRun`/`subscribeRunOutput` read pult's
+// on-disk run journal and stream from a shared Tauri event channel (see
+// src/lib/real/backend.ts). There's no journal and no Tauri runtime in
+// VITE_MOCK, so this is a small, deliberately modest demo standing in for
+// it — not a simulator of the on-disk protocol — reusing the scripted-run
+// machinery above (`driveScript`/`MOCK_SCRIPTS`) rather than inventing a
+// second timeline format:
+//
+//   - `HISTORY_RUNS` is a fixed, canned run history for the fixture repo:
+//     one exited (success), one crashed, one stopped — present from the
+//     very first `listRuns` call, so hydration-on-open has something to
+//     seed immediately.
+//   - `CLI_RUN_ID` is a single scripted "started outside the app" run: it
+//     doesn't exist at all in `listRuns`'s result until
+//     `CLI_RUN_APPEAR_AFTER_MS` after the fixture repo's first `listRuns`
+//     call (a reasonable proxy for "since this device was opened") — that's
+//     the ~3s poll's moment to discover it, appear as "running", and tail it
+//     live to completion, demoing "a `pult deploy` typed in a terminal shows
+//     up on the board" without any real CLI process behind it.
+//
+// A shared in-module pub/sub stands in for the real backend's Tauri event
+// channel, so `tailRun` here can deliver events the same "fire and forget,
+// listen separately" way `subscribeRunOutput` expects on both backends.
+const outputListeners = new Set<(event: RunEvent) => void>();
+
+function emitRunOutput(event: RunEvent): void {
+  for (const fn of outputListeners) fn(event);
+}
+
+export function subscribeRunOutput(onEvent: (event: RunEvent) => void): () => void {
+  outputListeners.add(onEvent);
+  return () => {
+    outputListeners.delete(onEvent);
+  };
+}
+
+function isoAgo(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+const MINUTE = 60_000;
+
+const HISTORY_EXITED_ID = "mock-history-exited";
+const HISTORY_CRASHED_ID = "mock-history-crashed";
+const HISTORY_STOPPED_ID = "mock-history-stopped";
+
+// Fixed at module load, not recomputed per call — a stable demo history
+// rather than one that keeps sliding later the longer the app has been
+// running.
+const HISTORY_RUNS: RunSummary[] = [
+  {
+    run_id: HISTORY_EXITED_ID,
+    command_id: "aws:deploy",
+    command_title: "Deploy stack",
+    status: "exited",
+    exit_code: 0,
+    started_at: isoAgo(41 * MINUTE),
+    ended_at: isoAgo(40 * MINUTE),
+    origin: "app",
+    interactive: false,
+  },
+  {
+    run_id: HISTORY_CRASHED_ID,
+    command_id: "import",
+    command_title: "Import",
+    status: "crashed",
+    exit_code: null,
+    started_at: isoAgo(25 * MINUTE),
+    ended_at: null,
+    origin: "cli",
+    interactive: false,
+  },
+  {
+    run_id: HISTORY_STOPPED_ID,
+    command_id: "test:smoke",
+    command_title: "Smoke test",
+    status: "stopped",
+    exit_code: null,
+    started_at: isoAgo(12 * MINUTE),
+    ended_at: isoAgo(11 * MINUTE),
+    origin: "app",
+    interactive: false,
+  },
+];
+
+// A few canned lines + a terminal exit per history run — what `tailRun`
+// replays the first (and only, in practice — the frontend never re-tails a
+// run whose output it already has) time each is looked at. `crashed: true`
+// on the crashed run's exit is the one place this mock deliberately does
+// what a real crash-detecting tail does (see the `RunEvent.exit.crashed` doc
+// comment in types.ts) — purely to demo that rendering.
+const HISTORY_REPLAY: Record<
+  string,
+  { lines: { stream: "stdout" | "stderr"; text: string }[]; exit: RunEvent & { kind: "exit" } }
+> = {
+  [HISTORY_EXITED_ID]: {
+    lines: [
+      { stream: "stdout", text: "building image…" },
+      { stream: "stdout", text: "pushing image…" },
+      { stream: "stdout", text: "releasing eu-west-1…" },
+      { stream: "stdout", text: "done" },
+    ],
+    exit: { kind: "exit", run_id: HISTORY_EXITED_ID, code: 0, stopped: false },
+  },
+  [HISTORY_CRASHED_ID]: {
+    lines: [
+      { stream: "stdout", text: "resolving vendor export…" },
+      { stream: "stdout", text: "authenticating with token '••••••'" },
+    ],
+    exit: { kind: "exit", run_id: HISTORY_CRASHED_ID, code: null, stopped: false, crashed: true },
+  },
+  [HISTORY_STOPPED_ID]: {
+    lines: [
+      { stream: "stdout", text: "collecting tests…" },
+      { stream: "stdout", text: "running unit suite…" },
+    ],
+    exit: { kind: "exit", run_id: HISTORY_STOPPED_ID, code: null, stopped: true },
+  },
+};
+
+// The single scripted "CLI-started" run (see the file-header comment above)
+// — its command reuses the existing `status` script (an indeterminate run:
+// no step/progress events, just a couple of lines) so it has something to
+// stream once tailed.
+const CLI_RUN_ID = "mock-cli-run";
+const CLI_RUN_COMMAND_ID = "status";
+const CLI_RUN_APPEAR_AFTER_MS = 10_000;
+
+let cliRunFirstSeenAt: number | null = null;
+let cliRunPhase: "hidden" | "running" | "done" = "hidden";
+let cliRunStartedAt = 0;
+let cliRunEndedAt: string | null = null;
+let cliRunDriving = false;
+
+export async function listRuns(path: string): Promise<RunSummary[]> {
+  await delay(60);
+  if (path !== FIXTURE_PATH) return [];
+  if (cliRunFirstSeenAt === null) cliRunFirstSeenAt = Date.now();
+  if (cliRunPhase === "hidden" && Date.now() - cliRunFirstSeenAt >= CLI_RUN_APPEAR_AFTER_MS) {
+    cliRunPhase = "running";
+    cliRunStartedAt = Date.now();
   }
-  await delay(120);
-  onEvent({ kind: "exit", run_id: runId, code: script.exitCode, stopped: false });
+  const runs = [...HISTORY_RUNS];
+  if (cliRunPhase === "running" || cliRunPhase === "done") {
+    runs.unshift({
+      run_id: CLI_RUN_ID,
+      command_id: CLI_RUN_COMMAND_ID,
+      command_title: "Status",
+      status: cliRunPhase === "running" ? "running" : "exited",
+      exit_code: cliRunPhase === "done" ? 0 : null,
+      started_at: new Date(cliRunStartedAt).toISOString(),
+      ended_at: cliRunPhase === "done" ? cliRunEndedAt : null,
+      origin: "cli",
+      interactive: false,
+    });
+  }
+  return runs;
+}
+
+export async function tailRun(path: string, runId: string): Promise<void> {
+  if (path !== FIXTURE_PATH) return;
+  const replay = HISTORY_REPLAY[runId];
+  if (replay) {
+    await delay(150);
+    for (const l of replay.lines) {
+      await delay(180);
+      emitRunOutput({ kind: "line", run_id: runId, stream: l.stream, text: l.text });
+    }
+    await delay(150);
+    emitRunOutput(replay.exit);
+    return;
+  }
+  if (runId === CLI_RUN_ID) {
+    if (cliRunDriving || cliRunPhase !== "running") return; // already driving, or finished/not-yet-visible
+    cliRunDriving = true;
+    const script = MOCK_SCRIPTS[CLI_RUN_COMMAND_ID] ?? DEFAULT_SCRIPT;
+    await driveScript(script, runId, emitRunOutput);
+    cliRunPhase = "done";
+    cliRunEndedAt = new Date().toISOString();
+    cliRunDriving = false;
+    return;
+  }
+  // Unknown to this mock (never in `HISTORY_RUNS`/`CLI_RUN_ID`) — mirror the
+  // real backend's "never journaled" fallback so a caller waiting on this
+  // run's events isn't left hanging forever.
+  emitRunOutput({ kind: "exit", run_id: runId, code: null, stopped: false });
 }
