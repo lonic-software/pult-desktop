@@ -186,14 +186,20 @@ export async function stopRun(_path: string, runId: string): Promise<void> {
   stoppedRuns.add(runId);
 }
 
-// Run ids currently being actively driven — by `runCommand` for a fresh
-// in-app run, or by `tailRun` for the scripted "CLI-started" run below —
-// mirroring the real backend's `TailRegistry` (src-tauri/src/journal.rs):
-// `tailRun` no-ops for any id already in here, so the explicit `tailRun`
-// call `startTail` makes right after an app-started run's `runCommand`
-// resolves (see +page.svelte's `handleRun`) never double-drives the script
-// or synthesizes a spurious "never journaled" exit out from under a run
-// that's actually still going.
+// Run ids `runCommand` is actively driving directly (a fresh in-app run —
+// see `runCommand` below). NOT a mirror of the real backend's
+// `TailRegistry` (fix round 3 corrected this stale claim): `runCommand`
+// drives an app-started run's script straight into `emitRunOutput`, gen-less,
+// the moment it's called — there's no journal and no tail standing in front
+// of it yet in this mock, unlike the real backend, where nothing is emitted
+// for a run_id until `startTail`'s `tail_run` call actually claims it. This
+// set exists purely so `tailRun`'s own explicit call right after an
+// app-started run's `runCommand` resolves (`startTail`, see +page.svelte's
+// `handleRun` — made only to match the real backend's single-tail-creation-
+// path shape) stays a genuine no-op instead of tripping `tailRun`'s
+// "unknown to this mock" fallback and synthesizing a spurious exit out from
+// under a run that's actually still going. `tailRun`'s OWN generation fence
+// (`tailGenerations`, below) is the actual `TailRegistry` mirror.
 const drivingRuns = new Set<string>();
 
 // Drives one script's actions into `emit`, checking `stoppedRuns` before
@@ -452,37 +458,66 @@ export async function listRuns(path: string): Promise<RunSummary[]> {
   return runs;
 }
 
+// Fix round 3's generation fence (mirrors the real backend's `TailRegistry`,
+// src-tauri/src/journal.rs), modeled just enough to exercise the OBSERVABLE
+// wire contract under VITE_MOCK: re-invoking `tailRun` for a run_id already
+// claimed here cancels/supersedes that claim (a flag its own replay checks
+// before every emit — not real concurrency, just the same
+// call-cancels-the-old-one outcome) and hands out a fresh, strictly
+// increasing generation starting the replay over from scratch, leading with
+// a `tail_start` event and stamping every event that generation goes on to
+// emit with it — the same shape types.ts's `RunEvent.tail_gen` doc comment
+// promises from a real tail. Deliberately not modeling more than that (no
+// real second thread ever races here) — the mock doesn't need more to demo
+// the fence.
+const tailGenerations = new Map<string, { generation: number; cancelled: { value: boolean } }>();
+
+function claimTailGeneration(runId: string): { generation: number; cancelled: { value: boolean } } {
+  const existing = tailGenerations.get(runId);
+  if (existing) existing.cancelled.value = true;
+  const claimed = { generation: (existing?.generation ?? 0) + 1, cancelled: { value: false } };
+  tailGenerations.set(runId, claimed);
+  return claimed;
+}
+
 export async function tailRun(path: string, runId: string): Promise<void> {
   if (path !== FIXTURE_PATH) return;
-  // Already being driven — either `runCommand` just started this run and
-  // `startTail`'s explicit `tailRun` call (see +page.svelte's `handleRun`)
-  // is only here to match the real backend's single-tail-creation-path
-  // shape, or a previous `tailRun` call is already driving the CLI run
-  // below. Either way, no-op, same as the real backend's `TailRegistry`.
+  // An app-started run's own script is already being driven directly by
+  // `runCommand` (see `drivingRuns`'s doc comment) — this call only exists
+  // to match the real backend's single-tail-creation-path shape (`startTail`
+  // always calls this right after `runCommand` resolves); there's no
+  // journal here to re-tail, so unlike everything below, this is a genuine
+  // no-op, not a generation-fenced restart.
   if (drivingRuns.has(runId)) return;
+
+  const { generation, cancelled } = claimTailGeneration(runId);
+  emitRunOutput({ kind: "tail_start", run_id: runId, tail_gen: generation });
+  const emit = (event: RunEvent) => {
+    if (cancelled.value) return;
+    emitRunOutput({ ...event, tail_gen: generation });
+  };
+
   const replay = HISTORY_REPLAY[runId];
   if (replay) {
     await delay(150);
     for (const l of replay.lines) {
       await delay(180);
-      emitRunOutput({ kind: "line", run_id: runId, stream: l.stream, text: l.text });
+      emit({ kind: "line", run_id: runId, stream: l.stream, text: l.text });
     }
     await delay(150);
-    emitRunOutput(replay.exit);
+    emit(replay.exit);
     return;
   }
   if (runId === CLI_RUN_ID) {
     if (cliRunPhase !== "running") return; // finished, or not yet visible
-    drivingRuns.add(runId);
     const script = MOCK_SCRIPTS[CLI_RUN_COMMAND_ID] ?? DEFAULT_SCRIPT;
-    await driveScript(script, runId, emitRunOutput);
+    await driveScript(script, runId, emit);
     cliRunPhase = "done";
     cliRunEndedAt = new Date().toISOString();
-    drivingRuns.delete(runId);
     return;
   }
   // Unknown to this mock (never in `HISTORY_RUNS`/`CLI_RUN_ID`) — mirror the
   // real backend's "never journaled" fallback so a caller waiting on this
   // run's events isn't left hanging forever.
-  emitRunOutput({ kind: "exit", run_id: runId, code: null, stopped: false });
+  emit({ kind: "exit", run_id: runId, code: null, stopped: false });
 }

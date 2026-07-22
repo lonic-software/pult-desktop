@@ -93,4 +93,23 @@ describe("reconcileDecision", () => {
     });
     expect(reconcileDecision(current, olderButSuperseding)).toEqual({ action: "reseed" });
   });
+
+  // Fix round 3's NaN-safe recency guard: `Date.parse` on an unparseable
+  // `started_at` returns `NaN`, and `NaN <= current.startedAt` is always
+  // `false` in JS — without the explicit guard, an unparseable summary would
+  // fall straight through to "reseed", stomping a live record with garbage.
+  it("skips a different run_id with an unparseable started_at while the held record is running", () => {
+    const current = record({ runId: "run-live", running: true });
+    const garbled = summary({ run_id: "run-old", started_at: "not-a-date" });
+    expect(reconcileDecision(current, garbled)).toEqual({ action: "skip" });
+  });
+
+  it("reseeds a different run_id with an unparseable started_at when the held record isn't running", () => {
+    // A dead record has nothing left to protect — the summary (garbled
+    // timestamp and all) is the only information left about this command's
+    // newest run.
+    const current = record({ runId: "run-finished", running: false });
+    const garbled = summary({ run_id: "run-new", started_at: "not-a-date" });
+    expect(reconcileDecision(current, garbled)).toEqual({ action: "reseed" });
+  });
 });

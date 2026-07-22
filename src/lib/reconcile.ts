@@ -32,6 +32,22 @@ export function reconcileDecision(
   if (!current) return { action: "seed" };
   if (current.runId === summary.run_id) return { action: "refresh" };
   const summaryStartedAt = Date.parse(summary.started_at);
+  // Fix round 3's NaN-safe guard: an unparseable `started_at` (`Date.parse`
+  // returns `NaN`) must not silently fall through the comparison below —
+  // `NaN <= current.startedAt` is always `false` in JS, which would have
+  // treated an unparseable summary as "newer" and reseeded over a live
+  // record on every poll. Same defense `recordFromSummary`'s
+  // `Number.isFinite` check already applies on the seed/reseed path itself;
+  // this is the recency guard's own copy of it. While `current.running`,
+  // the record is authoritative and the summary isn't trustworthy enough to
+  // displace it: skip, exactly like a stale-but-parseable summary would.
+  // Once the record is no longer running, though, it has nothing left to
+  // protect — the summary (garbled timestamp and all) is the only
+  // information left about this command's newest run, so reseed from it
+  // rather than getting stuck skipping forever.
+  if (Number.isNaN(summaryStartedAt)) {
+    return current.running ? { action: "skip" } : { action: "reseed" };
+  }
   if (current.running && summaryStartedAt <= current.startedAt) {
     return { action: "skip" };
   }
