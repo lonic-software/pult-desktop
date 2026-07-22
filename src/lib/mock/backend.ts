@@ -347,11 +347,25 @@ const HISTORY_REPLAY: Record<
   string,
   { lines: { stream: "stdout" | "stderr"; text: string }[]; exit: RunEvent & { kind: "exit" } }
 > = {
+  // A few lines here carry real ANSI escapes (as `FORCE_COLOR=1`-style
+  // output would) so VITE_MOCK demos ../ansi.ts + OutputPane's rendering of
+  // it without needing a real colored CLI running: a green ✓ (bold, since
+  // most tools bold their pass/fail glyphs), a cyan URL, and a bold red
+  // transient error — this run still exits 0, matching a real deploy log
+  // that retries a flaky step and moves on rather than failing outright.
   [HISTORY_EXITED_ID]: {
     lines: [
-      { stream: "stdout", text: "building image…" },
-      { stream: "stdout", text: "pushing image…" },
-      { stream: "stdout", text: "releasing eu-west-1…" },
+      { stream: "stdout", text: "\x1b[1;32m✓\x1b[0m building image…" },
+      { stream: "stdout", text: "\x1b[1;32m✓\x1b[0m pushing image…" },
+      {
+        stream: "stdout",
+        text: "\x1b[1;31merror: health check timed out, retrying (1/3)\x1b[0m",
+      },
+      { stream: "stdout", text: "\x1b[1;32m✓\x1b[0m releasing eu-west-1…" },
+      {
+        stream: "stdout",
+        text: "deployed: \x1b[36mhttps://acme-ops.eu-west-1.example.com\x1b[0m",
+      },
       { stream: "stdout", text: "done" },
     ],
     exit: { kind: "exit", run_id: HISTORY_EXITED_ID, code: 0, stopped: false },

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { parseAnsiLine, type Segment } from "../ansi";
+
   interface OutputLine {
     stream: "stdout" | "stderr" | "exit";
     text: string;
@@ -62,6 +64,31 @@
       containerEl.scrollTop = containerEl.scrollHeight;
     }
   });
+
+  // ANSI segment rendering (stdout/stderr text only — see ansi.ts's module
+  // comment for the parser itself). SECURITY: this only ever produces a
+  // `style` attribute string built from values this module computed itself
+  // (a fixed "ansi-N" token or a hex string assembled byte-by-byte in
+  // ansi.ts's `toHex`) — segment *text* always goes through plain Svelte
+  // text interpolation below, never `{@html}`.
+  function segmentStyle(seg: Segment): string {
+    const parts: string[] = [];
+    if (seg.fg) parts.push(`color: ${colorValue(seg.fg)}`);
+    if (seg.bg) parts.push(`background-color: ${colorValue(seg.bg)}`);
+    if (seg.bold) parts.push("font-weight: 700");
+    if (seg.dim) parts.push("opacity: 0.7");
+    if (seg.italic) parts.push("font-style: italic");
+    if (seg.underline) parts.push("text-decoration: underline");
+    return parts.join("; ");
+  }
+
+  // Palette tokens ("ansi-0".."ansi-15") resolve through this pane's own
+  // custom properties (see the .output rules below) so the 16-color
+  // palette stays tunable in one place; anything else is already a literal
+  // "#rrggbb" from ansi.ts's 256-color/truecolor math — used as-is.
+  function colorValue(token: string): string {
+    return token.startsWith("ansi-") ? `var(--${token})` : token;
+  }
 </script>
 
 <div class="output mono pult-screen pult-crt-glow" class:dim bind:this={containerEl} onscroll={onScroll}>
@@ -71,9 +98,17 @@
         : "ran in a terminal — output wasn't captured (interactive command)"}</span>
   {/if}
   {#each lines as line, i (i)}
-    <span class="line {line.stream}" class:outcome-success={line.outcome === "success"} class:outcome-error={line.outcome === "error"} class:outcome-stopped={line.outcome === "stopped"} class:outcome-crashed={line.outcome === "crashed"}
-      >{line.text}</span
-    >
+    {#if line.stream === "stdout" || line.stream === "stderr"}
+      <span class="line {line.stream}">
+        {#each parseAnsiLine(line.text) as seg, si (si)}
+          <span style={segmentStyle(seg)}>{seg.text}</span>
+        {/each}
+      </span>
+    {:else}
+      <span class="line {line.stream}" class:outcome-success={line.outcome === "success"} class:outcome-error={line.outcome === "error"} class:outcome-stopped={line.outcome === "stopped"} class:outcome-crashed={line.outcome === "crashed"}
+        >{line.text}</span
+      >
+    {/if}
   {/each}
   {#if running}
     <span class="cursor" aria-hidden="true">▌</span>
@@ -98,6 +133,37 @@
     flex-direction: column;
     gap: 4px;
     padding: 13px 15px;
+
+    /* ANSI 16-color palette (parsed by ../ansi.ts, consumed via
+       segmentStyle/colorValue above as `var(--ansi-N)`) — scoped here
+       rather than in crt.css because only this pane's stdout/stderr text
+       ever needs it. Deliberately ONE palette, not a light/dark pair: this
+       screen's own background (--crt-bg, crt.css) is a fixed phosphor tint
+       that doesn't change with the app's light/dark theme (crt.css's file
+       comment — "a physical tube doesn't change with room lighting"), so
+       there's nothing for a second theme variant to adapt to. Hand-tuned
+       against --crt-bg (#10160f) rather than pasted stock VGA values: hues
+       stay recognizable as the classic 16 (red/green/yellow/blue/magenta/
+       cyan + neutrals, each with a brighter 8-15 counterpart) but pulled
+       toward the same warm/cool balance as the rest of the phosphor
+       palette below, so colored output reads as part of this screen
+       instead of a foreign terminal pasted on top of it. */
+    --ansi-0: #3b4a3f;
+    --ansi-1: #e88a7a;
+    --ansi-2: #7ed492;
+    --ansi-3: #d9c46a;
+    --ansi-4: #6fa8d8;
+    --ansi-5: #c98fd9;
+    --ansi-6: #6fd6d0;
+    --ansi-7: #a9c9ab;
+    --ansi-8: #7c8f80;
+    --ansi-9: #ff8a75;
+    --ansi-10: #9de8ac;
+    --ansi-11: #f0d98a;
+    --ansi-12: #93c3ec;
+    --ansi-13: #e0aeef;
+    --ansi-14: #8ceae4;
+    --ansi-15: #e9f5ea;
   }
 
   .line {
@@ -158,10 +224,16 @@
   }
 
   /* Replayed (idle, prior-run) output — stdout/stderr text dims; the exit
-     summary keeps its outcome color, see the Props comment above. */
+     summary keeps its outcome color, see the Props comment above. `opacity`
+     (rather than only the `color` swap) so a line's ANSI-colored segments —
+     which carry their own inline `color`/`background-color`, see
+     segmentStyle above, and so don't pick up the `color` override below —
+     dim along with everything else instead of staying full-bright while
+     their plain-text neighbors mute. */
   .output.dim .line.stdout,
   .output.dim .line.stderr {
     color: var(--crt-dim, #5f7563);
+    opacity: 0.75;
   }
 
   .cursor {
