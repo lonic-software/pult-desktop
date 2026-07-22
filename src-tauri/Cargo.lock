@@ -2588,9 +2588,11 @@ dependencies = [
 name = "pult-desktop"
 version = "0.2.1"
 dependencies = [
+ "dirs",
  "fix-path-env",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

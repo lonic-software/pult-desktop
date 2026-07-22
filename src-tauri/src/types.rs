@@ -153,10 +153,7 @@ pub enum RunEvent {
     },
     /// `status <text>` from the `PULT_EVENTS` channel — a transient activity
     /// line. Unix only, same caveat as `Step`.
-    Status {
-        run_id: String,
-        text: String,
-    },
+    Status { run_id: String, text: String },
     Exit {
         run_id: String,
         code: Option<i32>,
@@ -165,5 +162,13 @@ pub enum RunEvent {
         /// distinct from a natural (possibly non-zero, possibly signal-killed
         /// from outside this app) exit.
         stopped: bool,
+        /// Reader-derived: `meta.json` said `"running"` but the journaling
+        /// pult process was dead (crash detection — see
+        /// `crate::journal::synthesize_exit`). Never set by a journaled
+        /// `exit` line itself, only synthesized by the tail when no such
+        /// line ever arrives. Additive: defaults to `false` so older/other
+        /// producers of this event don't need to know about it.
+        #[serde(default)]
+        crashed: bool,
     },
 }

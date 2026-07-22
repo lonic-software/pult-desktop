@@ -26,6 +26,12 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 which = "8.0.5"
 tokio = { version = "1.52.3", features = ["process", "io-util", "rt", "macros", "time"] }
+# Run-journal reader (src/journal.rs): same repo-key hash and state-dir
+# resolution as pult's own writer (tui repo's src/journal.rs), so both sides
+# agree on where a repo's journal lives without either being a source of
+# truth for the other.
+sha2 = "0.10"
+dirs = "6"
 # Not on crates.io (git-only, version 0.0.0) — pinned to the tip of `dev` as
 # of this writing. Repairs PATH from the user's login shell on macOS/Linux
 # (GUI launches inherit launchd's/desktop-session's minimal PATH, not the
