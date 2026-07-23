@@ -224,16 +224,18 @@
   }
 
   /* Replayed (idle, prior-run) output — stdout/stderr text dims; the exit
-     summary keeps its outcome color, see the Props comment above. `opacity`
-     (rather than only the `color` swap) so a line's ANSI-colored segments —
-     which carry their own inline `color`/`background-color`, see
-     segmentStyle above, and so don't pick up the `color` override below —
-     dim along with everything else instead of staying full-bright while
-     their plain-text neighbors mute. */
+     summary keeps its outcome color, see the Props comment above. Dim via
+     `opacity` alone rather than also swapping `color`: a line's ANSI-colored
+     segments carry their own inline `color`/`background-color` (see
+     segmentStyle above) that overrides any `color` set here, so a combined
+     color+opacity rule only ever muted the plain-text default while ANSI
+     spans stayed bright — inconsistent and, for plain text, low-contrast
+     against the CRT glass once the ambient glow/shine layers wash extra
+     light over it. Opacity alone dims every segment uniformly and preserves
+     each segment's hue relationships. */
   .output.dim .line.stdout,
   .output.dim .line.stderr {
-    color: var(--crt-dim, #5f7563);
-    opacity: 0.75;
+    opacity: 0.65;
   }
 
   .cursor {
