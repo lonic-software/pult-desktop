@@ -199,23 +199,31 @@
   }
 
   /* Ambient wash — verbatim technique from Meter.svelte's `.well::before`
-     (see that file's comment for why this needs its own element/property
-     rather than a third layer on `.well`'s own animated box-shadow), scaled
-     up for the tower's much larger well. The one difference from
-     Meter.svelte: `--meter-glow-color`/`--meter-glow-level` are NOT set
-     here — RunView.svelte computes them once (tower.ts's `towerGlowVars`,
-     from the same `TowerDisplay` this component already renders) and sets
-     them as inline custom properties on the page root (`.run-view`), so the
-     params/stages/output screens across the page (crt.css's
-     `.pult-crt::before`) read the exact same live color/level for their own
-     "shine-back" reflection — one source of truth for both, since a var
-     set here on the tower's own well could never reach a sibling subtree
-     via inheritance. Falls back to `transparent`/`0` (inert) if this is
-     ever rendered outside that ancestor. */
+     (see that file's comment for the full radial-gradient/opacity
+     rationale, the box-shadow-falloff problem it replaced, why the
+     gradient is sized `closest-side` rather than the default farthest-
+     corner — so the falloff to transparent completes at each straight edge
+     instead of leaving a visible seam there — and why `.segments` below
+     needs its own z-index now), scaled up for the
+     tower's much larger well: bigger negative `inset` (-200px, reaching
+     into the params/stages/output screens across the grid gap) and a
+     slightly higher `K` (0.45 vs Meter's 0.4, mirroring the old 32%-vs-28%
+     mix this replaced) since this is the page's one and only glow source.
+     The one difference from Meter.svelte: `--meter-glow-color`/
+     `--meter-glow-level` are NOT set here — RunView.svelte computes them
+     once (tower.ts's `towerGlowVars`, from the same `TowerDisplay` this
+     component already renders) and sets them as inline custom properties
+     on the page root (`.run-view`), so the params/stages/output screens
+     across the page (crt.css's `.pult-crt::before`) read the exact same
+     live color/level for their own "shine-back" reflection — one source of
+     truth for both, since a var set here on the tower's own well could
+     never reach a sibling subtree via inheritance. Falls back to
+     `transparent`/`0` (inert) if this is ever rendered outside that
+     ancestor. */
   .well::before {
     content: "";
     position: absolute;
-    inset: 0;
+    inset: -200px;
     pointer-events: none;
     /* Visual bug fix, not a visual change: same stacking-context trap as
        Meter.svelte's `.well::before` (see its comment for the full
@@ -229,12 +237,19 @@
        page — this is the one page with only a single glow source, so unlike
        the board's many cards (Meter.svelte) there's no same-z-index
        neighbor to tie-break against. `pointer-events: none` above already
-       keeps this from ever blocking a click, and the tower's own segments
-       are unaffected the same way Meter.svelte's are — this pseudo-element
-       has no fill, only the shadow it casts outside its own box. */
+       keeps this from ever blocking a click. Unlike the old shadow-only
+       layer, this one now has real fill reaching back behind the tower's
+       own segments (the negative inset) — see `.segments`' z-index below
+       for how those stay legible on top of it. */
     z-index: 1;
-    box-shadow: 0 0 120px 16px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 32%), transparent);
-    transition: box-shadow 420ms ease;
+    background: radial-gradient(
+      ellipse closest-side at center,
+      var(--meter-glow-color, transparent) 0%,
+      color-mix(in srgb, var(--meter-glow-color, transparent) 60%, transparent) 45%,
+      transparent 100%
+    );
+    opacity: calc(var(--meter-glow-level, 0) * 0.45);
+    transition: opacity 420ms ease;
   }
 
   .well.glow-green {
@@ -362,6 +377,12 @@
   }
 
   .segments {
+    /* Stacked above `.well::before`'s ambient wash — see Meter.svelte's
+       `.segments` comment for the full rationale (identical trap: the
+       wash's negative inset gives it fill directly behind these segments
+       now, where the old box-shadow never painted). */
+    position: relative;
+    z-index: 2;
     height: 100%;
     display: flex;
     flex-direction: column-reverse;

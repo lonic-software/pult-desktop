@@ -18,7 +18,14 @@
   import { onMount, onDestroy } from "svelte";
   import type { CommandInfo, DoctorReport, Param, RunRecord } from "../types";
   import { readinessFor } from "../readiness";
-  import { towerStateFor, towerDisplay, towerGlowVars, type TowerRunInput, type TowerBlinkOverride } from "../tower";
+  import {
+    towerStateFor,
+    towerDisplay,
+    towerGlowVars,
+    type TowerRunInput,
+    type TowerBlinkOverride,
+    type MeterGlowVars,
+  } from "../tower";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, TOWER_FAILURE_BLINK_COUNT, BLINK_PERIOD_MS } from "../meterLiveness";
   import { deriveStages, stagesVisible } from "../stages";
   import { formatClock, formatDuration, formatRelative } from "../time";
@@ -45,10 +52,33 @@
      *  its own back control, but still needs the callback for the Esc
      *  shortcut below. */
     onBack: () => void;
+    /** Optional: fired with this page's live `meterGlow` every time it
+     *  changes, so +page.svelte can mirror the exact same
+     *  color/level onto `.body` for Rack.svelte's sidebar shine-back
+     *  (see that component and the effect below) without recomputing
+     *  `towerStateFor`/`towerDisplay`/`towerGlowVars` a second time from
+     *  scratch — `towerBlink` above is timed state private to this
+     *  component, so the only way for +page.svelte to agree with this
+     *  page's tower on every frame, blinks included, is to be handed the
+     *  already-computed result rather than re-deriving it from a copy of
+     *  the same inputs. Optional so this component still works standalone
+     *  (tests, a future second caller) without a sidebar to feed. */
+    onGlowChange?: (glow: MeterGlowVars) => void;
   }
 
-  let { command, path, trusted, doctorReport, run, initialValues, onRun, onStop, onValuesChange, onBack }: Props =
-    $props();
+  let {
+    command,
+    path,
+    trusted,
+    doctorReport,
+    run,
+    initialValues,
+    onRun,
+    onStop,
+    onValuesChange,
+    onBack,
+    onGlowChange,
+  }: Props = $props();
 
   // ---------------------------------------------------------------------
   // Param values: session lift (initialValues/onValuesChange, owned by
@@ -278,6 +308,25 @@
   // (not on the tower itself) because this is the one ancestor shared by
   // both — see tower.ts's `towerGlowVars` doc comment.
   const meterGlow = $derived(towerGlowVars(towerDisplayValue));
+
+  // Rack.svelte's sidebar shine-back (visual-polish addendum, same family
+  // as the screens' shine-back above) needs this exact same value up on
+  // +page.svelte's `.body` — the rack sidebar is a sibling of this whole
+  // page, outside anything `.run-view`'s own custom properties reach by
+  // inheritance. Forwarded via callback rather than re-derived from scratch
+  // up there (see the `onGlowChange` prop doc comment) so the two surfaces
+  // can never disagree, blink states included. Reset to inert on unmount —
+  // +page.svelte only renders this component while the details page is
+  // open (see the file-level comment on `finishedDuringVisit`), so without
+  // this the rack would keep glowing with this command's last reading after
+  // navigating back to the board, where deliberately no rack shine belongs
+  // at all (see +page.svelte's `bodyGlow`).
+  $effect(() => {
+    onGlowChange?.(meterGlow);
+  });
+  onDestroy(() => {
+    onGlowChange?.({ color: "transparent", level: 0 });
+  });
 
   // ---------------------------------------------------------------------
   // A 1s ticking clock, only while mounted — drives the "elapsed M:SS"

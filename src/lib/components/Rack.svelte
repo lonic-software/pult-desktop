@@ -162,6 +162,8 @@
 <style>
   .rack,
   .rack-collapsed {
+    position: relative; /* containing block for `.rack::after`'s shine-back
+    below */
     flex: none;
     display: flex;
     flex-direction: column;
@@ -177,6 +179,48 @@
   .rack-collapsed {
     width: 34px;
     align-items: center;
+  }
+
+  /* Sidebar shine-back (visual-polish addendum, mirrors crt.css's
+     `.pult-crt::before` screen reflection almost verbatim — same
+     transitioned-`background-color`-under-a-fixed-mask technique, same
+     white-fading-to-transparent mask gotcha, see that file's comment for
+     the full "why white, not black" rationale). Exists because the details
+     page's tower glow can't reach this sidebar any other way: `.board` is
+     `overflow-y: auto` and `.run-view` is `overflow: hidden`, so nothing
+     painted by either content-pane view (including Meter's/Tower's own
+     ambient washes) can ever bleed across into this sibling element — the
+     wash has to be re-created here from the same two vars instead, exactly
+     like the CRT screens already do.
+     `--meter-glow-color`/`--meter-glow-level` come from +page.svelte's
+     `.body` (RunView forwards its own `meterGlow` up there via
+     `onGlowChange` — see +page.svelte's `bodyGlow` for why it isn't
+     recomputed here), NOT from this component — Rack.svelte has no view of
+     the tower at all. Unset/zero (the board view, and this component's
+     initial render before any run view has ever mounted) collapses this to
+     fully transparent, so the board page — deliberately, see +page.svelte's
+     `bodyGlow` comment — never shows any of this.
+     Enters from the RIGHT edge (the edge facing the content pane/tower, the
+     mirror image of the CRT reflection's left-edge entry) and reaches a
+     fixed ~72px into the sidebar regardless of `.rack`'s own width — a
+     length-unit gradient stop (not a percentage one) is what makes that
+     reach fixed rather than proportional to the box. Noticeably dimmer
+     ceiling (0.14 vs the CRT glass's 0.22) since this is spill light doubly
+     removed from the source (through the tower's wash, reflected again off
+     a sidebar it never directly touches) — it should read as a faint
+     awareness of the glow next door, not a second version of it. */
+  .rack::after,
+  .rack-collapsed::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background-color: var(--meter-glow-color, transparent);
+    opacity: calc(var(--meter-glow-level, 0) * 0.14);
+    mask-image: linear-gradient(to left, white, transparent 72px);
+    -webkit-mask-image: linear-gradient(to left, white, transparent 72px);
+    transition: background-color 420ms ease, opacity 420ms ease;
   }
 
   .expand {

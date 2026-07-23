@@ -338,26 +338,61 @@
   }
 
   /* Ambient wash (see the script block's comment above `AMBIENT_COLOR`): a
-     second, separate box-shadow on its own pseudo-element rather than a
-     third layer on `.well`'s own `box-shadow` — that property is already
-     owned by the `lamp-breathe`/blink keyframes above, and a CSS animation
-     always wins the *whole* property over a transition, so a wash sharing
-     it could never ease, only snap. Living on an independent element/
-     property is what lets this one keep a real `transition` while the
-     flicker keeps its own sharp keyframes, with neither fighting the other.
-     A `color-mix` percentage driven by `--meter-glow-level` (0..1, see the
-     script) rather than a separate `opacity` — one property to transition,
-     and it composes with the color swap in the same interpolation. Sized
-     via a large blur + modest spread (well beyond the well's own ~11-19px
-     scale) so it reads as the surrounding pad/panel warming, not a bigger
-     LED; kept modest enough that it stays inside the card/module's own box
-     on every real call site rather than banking on bleeding past an
-     ancestor's edge (CommandCard's `.card`/Board's `.module` don't clip, so
-     a little overflow would be fine, but nothing here depends on it). */
+     radial gradient on its own pseudo-element rather than a third layer on
+     `.well`'s own `box-shadow` — that property is already owned by the
+     `lamp-breathe`/blink keyframes above, and a CSS animation always wins
+     the *whole* property over a transition, so a wash sharing it could
+     never ease, only snap. Living on an independent element/property is
+     what lets this one keep a real `transition` while the flicker keeps its
+     own sharp keyframes, with neither fighting the other.
+
+     Was a blurred box-shadow (0 0 52px 6px, color-mix'd alpha) until user
+     feedback that the wash "fades out on the edges" and doesn't reach far
+     enough to warm the rack sidebar — a box-shadow's blur is a roughly
+     Gaussian falloff, strongest at the box edge and gone well before the
+     blur radius is spent, so no amount of turning up the blur alone reads
+     as a wide, evenly-present wash. Replaced with an explicit radial
+     gradient extended past the well's own box via a large negative `inset`
+     (the pseudo-element is now a much bigger box than `.well` itself, sized
+     to actually carry to a card's edges and, on the details page, into the
+     rack — see Rack.svelte's mirrored shine-back for why that reach
+     matters): flat-strength center, still ≳60% of peak at the *middle* of
+     the radius, only easing to fully transparent at the outer edge — a
+     shape that holds presence through the bleed instead of dumping most of
+     it in the first few pixels. Sized `closest-side`, not the radial-
+     gradient default of farthest-corner: farthest-corner puts the
+     `transparent 100%` stop at the box's corners, so along each straight
+     edge's midpoint (closer than the corner) the gradient still carries
+     visible alpha right where the box's paint ends — a hard rectangular
+     seam. `closest-side` sizes the ellipse to the nearest edge instead, so
+     the falloff reaches zero at/before every edge and the corners beyond
+     the ellipse are genuinely transparent already, with no separate
+     clipping step needed. The gradient's own stops stay a fixed
+     shape; `opacity` (not a `color-mix` percentage) is what
+     `--meter-glow-level` (0..1) drives now, since a shape that never
+     changes only needs one interpolable scalar to fade in/out, and opacity
+     is cheaper to animate than recomputing gradient stops. `K` (0.28 for
+     the small board meter here; the large Tower/RunView meter keeps its
+     own 0.4 copy just below) is picked so a normal reading's *center*
+     strength lands in the same ballpark the old box-shadow's ~28% mix
+     produced — the gain is entirely in how far that strength now carries,
+     not in a brighter core. The small meter's mid stop (42%, vs. the large
+     meter's 60%) and tighter -70px inset were pulled back further still
+     after the board's much denser packing of overlapping washes (two card
+     rows plus adjacent columns) made per-wash strength compound into
+     module-wide color bands instead of reading as separate pools of light
+     — see `.well.lg::before` just below for why the large meter's numbers
+     didn't move.
+
+     The negative inset means this layer now has real fill directly behind
+     the well's own segments (the old shadow never painted there), so
+     `.segments` below is bumped to its own higher z-index to keep the LEDs
+     reading crisply over the gradient's bright center — see that rule's
+     comment. */
   .well::before {
     content: "";
     position: absolute;
-    inset: 0;
+    inset: -70px;
     pointer-events: none;
     /* Visual bug fix, not a visual change: this wash is meant to read as
        light falling ON the surrounding card/module, but with every
@@ -376,17 +411,36 @@
        the card only wins against neighbors that *aren't themselves*
        glowing, and most of a real board's cards are. Doesn't touch this
        layer's color/size/timing, and `pointer-events: none` above already
-       keeps it from ever blocking a click no matter how high it paints;
-       the well's own LED segments are never at risk either, since this
-       pseudo-element has no fill of its own — only the shadow it casts
-       outside its box — so it can never sit visually on top of them. */
+       keeps it from ever blocking a click no matter how high it paints.
+       Unlike the old shadow-only layer, this one *does* now have fill
+       reaching back behind the well's own segments — see `.segments`'
+       z-index below for how those stay legible on top of it. */
     z-index: 1;
-    box-shadow: 0 0 52px 6px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 28%), transparent);
-    transition: box-shadow 420ms ease;
+    background: radial-gradient(
+      ellipse closest-side at center,
+      var(--meter-glow-color, transparent) 0%,
+      color-mix(in srgb, var(--meter-glow-color, transparent) 42%, transparent) 45%,
+      transparent 100%
+    );
+    opacity: calc(var(--meter-glow-level, 0) * 0.28);
+    transition: opacity 420ms ease;
   }
 
+  /* Large meter (Tower/RunView's details-page 28-segment sibling) keeps
+     today's approved wash strength — its own explicit gradient/opacity
+     copies (60% mid stop, K=0.4), not the small-meter board-tuned values
+     above, since the small-meter `.well::before` base rule is where those
+     board-only numbers live and `.well.lg::before` would otherwise inherit
+     them via the cascade (it used to only re-declare `inset`). */
   .well.lg::before {
-    box-shadow: 0 0 70px 9px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 28%), transparent);
+    inset: -110px;
+    background: radial-gradient(
+      ellipse closest-side at center,
+      var(--meter-glow-color, transparent) 0%,
+      color-mix(in srgb, var(--meter-glow-color, transparent) 60%, transparent) 45%,
+      transparent 100%
+    );
+    opacity: calc(var(--meter-glow-level, 0) * 0.4);
   }
 
   .well.glow-running {
@@ -544,6 +598,17 @@
   }
 
   .segments {
+    /* Stacked above `.well::before`'s ambient wash (z-index: 1, see its
+       comment): that layer's negative `inset` now gives it real fill
+       directly behind the well's own segments, where the old box-shadow
+       never painted, so without an explicit z-index here the wash (a
+       later-painted positive-z-index box in the same stacking context)
+       would sit visually on top of the LEDs it's meant to surround, not
+       behind them. A plain z-index bump, no `position` change needed —
+       `.well` is already the containing block both this and `::before`
+       share. */
+    position: relative;
+    z-index: 2;
     display: flex;
     flex-direction: column-reverse;
     gap: 3px;

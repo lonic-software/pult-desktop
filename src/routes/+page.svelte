@@ -32,6 +32,7 @@
   import { adoptTailGen, shouldAcceptEvent } from "$lib/tailGen";
   import { formatDuration } from "$lib/time";
   import type { BoardMeterOverride } from "$lib/readiness";
+  import type { MeterGlowVars } from "$lib/tower";
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, BLINK_PERIOD_MS } from "$lib/meterLiveness";
   import Toolbar from "$lib/components/Toolbar.svelte";
   import Rack from "$lib/components/Rack.svelte";
@@ -61,6 +62,20 @@
   // the last-active device re-opens on launch (see onMount).
   let devices: RackDevice[] = $state([]);
   let rackCollapsed = $state(false);
+
+  // Rack sidebar shine-back (visual-polish addendum, Rack.svelte's mirror
+  // of crt.css's screen reflection): RunView owns the actual
+  // `towerStateFor`/`towerDisplay`/`towerGlowVars` computation (its
+  // `towerBlink` override is timed, component-local state), so this is fed
+  // via its `onGlowChange` callback rather than recomputed here from a
+  // second copy of the same inputs — see that prop's doc comment for why a
+  // second computation could disagree (blink timing especially). Defaults
+  // to inert so the board view — which never mounts RunView, and
+  // deliberately gets NO sidebar shine at all (many independent glow
+  // sources across the board's cards, no single aggregate signal the way
+  // the details page's one tower is) — always renders `.body` with the
+  // vars unset/zeroed, same as this starting value.
+  let bodyGlow: MeterGlowVars = $state({ color: "transparent", level: 0 });
 
   // Paths where the user clicked "Not now" on the trust modal this session —
   // suppresses re-prompting on every switch back to that device. Read only
@@ -1071,7 +1086,10 @@
     onOpenSettings={openSettings}
   />
 
-  <div class="body">
+  <div
+    class="body"
+    style="--meter-glow-color: {bodyGlow.color}; --meter-glow-level: {bodyGlow.level}"
+  >
     <Rack
       {devices}
       activePath={repoPath}
@@ -1107,6 +1125,7 @@
           onStop={() => selectedRun && handleStop(selectedRun.runId)}
           onValuesChange={(values) => handleValuesChange(selectedCommand.id, values)}
           onBack={backToBoard}
+          onGlowChange={(glow) => (bodyGlow = glow)}
         />
       </main>
     {:else}
