@@ -2,11 +2,16 @@
 //!
 //! `pult` is resolved from (in order): a path saved in the settings store,
 //! then `which pult` on the user's PATH, then a bundled sidecar binary next
-//! to the app's own executable — see [`resolve_pult`]. The sidecar is a
-//! checksummed pult release binary fetched per-target-triple at package
-//! time by `scripts/fetch-pult-sidecar.mjs` (pinned version + checksums in
-//! `src-tauri/sidecar.json`) and registered via `tauri.conf.json`'s
-//! `bundle.externalBin`; see the README's "Sidecar bundling" section.
+//! to the app's own executable — see [`resolve_pult`]. That PATH is the
+//! user's login shell's PATH, not launchd's/the desktop session's minimal
+//! one: `lib.rs::run()` repairs it via `fix_path_env::fix()` before
+//! anything can call [`resolve_pult`], so a Finder-launched app finds
+//! PATH-installed tools the same way a terminal launch would. The sidecar
+//! is a checksummed pult release binary fetched per-target-triple at
+//! package time by `scripts/fetch-pult-sidecar.mjs` (pinned version +
+//! checksums in `src-tauri/sidecar.json`) and registered via
+//! `tauri.conf.json`'s `bundle.externalBin`; see the README's "Sidecar
+//! bundling" section.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
