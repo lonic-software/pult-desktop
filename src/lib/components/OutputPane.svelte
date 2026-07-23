@@ -177,12 +177,40 @@
      the ancestor `.pult-crt` regardless of Svelte's per-component scoping —
      see crt.css's file comment) with a literal fallback in case this pane
      is ever rendered outside that ancestor. */
+  /* Phosphor-cooling decay: when a run finishes and the pane dims (see the
+     `.output.dim` rule below), stdout/stderr opacity should fade rather than
+     snap. A real CRT tube's afterglow actually front-loads its decay (fast
+     dim, then a long tail), but that's the opposite of what this feature
+     needs: a transition that dims most of the way in the first few hundred
+     ms reads as an instant cut, not a fade — visibility beats physical
+     accuracy here. So the curve is a slow-in/slow-out sigmoid (roughly
+     symmetric, not eased-out) over several seconds, long enough that the eye
+     can actually track the light draining rather than notice it's already
+     gone. This rule (leaving the dim state, i.e. un-dimming when a new run
+     starts) has no delay: `dim` flips false the moment a run starts, and
+     RunView's history clears/replaces lines for a fresh run anyway, so any
+     visible un-dim here is on lines that are about to be replaced regardless
+     — no need to hold it.
+     The `transition` has to live here, on the *base* rule that applies in
+     both the bright and dim states, not only inside `.dim` — a transition
+     only animates a property change on the element it's already declared
+     on, so a rule scoped to `.dim` alone would apply the property at the
+     same instant the opacity value changes and never get a chance to run.
+     Declaring it here costs nothing on newly mounted lines: Svelte's DOM
+     insertion doesn't count as a transitionable property change (there's no
+     prior computed value to interpolate from), so appended lines still
+     render at full brightness immediately with no fade-in.
+     Reduced motion is handled globally (global.css collapses all
+     transition/animation durations under prefers-reduced-motion), so no
+     local override is needed here. */
   .line.stdout {
     color: var(--crt-ink, #a9c9ab);
+    transition: opacity 4s cubic-bezier(0.45, 0.05, 0.55, 0.95);
   }
 
   .line.stderr {
     color: var(--crt-red, #e88a7a);
+    transition: opacity 4s cubic-bezier(0.45, 0.05, 0.55, 0.95);
   }
 
   /* The interactive-run placeholder (see `showInteractiveNote` above) —
@@ -236,6 +264,15 @@
   .output.dim .line.stdout,
   .output.dim .line.stderr {
     opacity: 0.65;
+    /* Entering dim gets a short delay the base rule above doesn't: since
+       transitions are read from the destination state's own rule, this
+       (more specific) `transition` wins over the base one only while `.dim`
+       applies, letting the exit summary land and get read for a beat before
+       the glow visibly starts cooling — makes the fade read as a
+       consequence of the run ending rather than a random animation kicking
+       off mid-scroll. Un-dimming (this rule ceasing to apply) falls back to
+       the base rule's undelayed transition, see its comment above. */
+    transition: opacity 4s cubic-bezier(0.45, 0.05, 0.55, 0.95) 250ms;
   }
 
   .cursor {
