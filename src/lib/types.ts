@@ -139,6 +139,24 @@ export interface OutputLine {
    *  recorded an exit at all, reader-derived (see `RunEvent`'s `exit.crashed`
    *  doc comment below). */
   outcome?: "success" | "error" | "stopped" | "crashed";
+  /** Phosphor persistence bloom (design backlog): the wall-clock moment this
+   *  `stdout`/`stderr` line was appended, set ONLY when +page.svelte's
+   *  `applyEvent` (the "line" case) judges the event genuinely live — the
+   *  run's record was still `running` AND the event arrived more than
+   *  `LIVE_LINE_TAIL_AGE_MS` after its tail started (see that constant's doc
+   *  comment) — never on replayed backlog, which lands well inside that
+   *  window on the same tail. A timestamp rather than a boolean: OutputPane
+   *  re-renders every line whenever its pane remounts (switching the view
+   *  away and back mid-run), and a bare boolean would replay the bloom
+   *  animation on old lines every time that happens — OutputPane instead
+   *  checks `Date.now() - freshAt` against a short recency window AT RENDER
+   *  TIME, so the animation only ever plays once, right when the line's DOM
+   *  node is first created (a fresh line's own creation, or — for an old
+   *  line re-rendered after a remount — never, since by then the window has
+   *  long since closed). Absent means "not fresh" — every other line
+   *  construction site (the `exit` summary line, the stop-rejection stderr
+   *  patch, hydrated/replayed lines) simply omits it. */
+  freshAt?: number;
 }
 
 /** One `step` event, timestamped at arrival — the timestamp isn't part of

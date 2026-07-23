@@ -10,6 +10,13 @@
      *  gets the same red as `"error"` (see `.outcome-crashed` below) — the
      *  distinction is in the wording, not the color. */
     outcome?: "success" | "error" | "stopped" | "crashed";
+    /** Phosphor persistence bloom (design backlog) — set by +page.svelte's
+     *  `applyEvent` only on a genuinely live-arriving `stdout`/`stderr` line
+     *  (see `OutputLine.freshAt`'s doc comment in `$lib/types.ts` for the
+     *  live-vs-replay determination). `isBloomFresh` below is what actually
+     *  decides whether to play the animation right now — this field alone
+     *  never does. */
+    freshAt?: number;
   }
 
   interface Props {
@@ -89,6 +96,36 @@
   function colorValue(token: string): string {
     return token.startsWith("ansi-") ? `var(--${token})` : token;
   }
+
+  // Phosphor persistence bloom (design backlog): how long after `freshAt`
+  // a line still gets the `.bloom` class — comfortably longer than the CSS
+  // animation itself (~350ms, see `.line.bloom` below) so the class is still
+  // present when the animation naturally finishes playing (an element
+  // doesn't need a class held past its own animation's end, but there's no
+  // reason to race removing it either), yet short enough that a line is
+  // reliably judged "not fresh" again well before anyone could plausibly
+  // switch views away and back to see it.
+  const BLOOM_RECENT_MS = 600;
+
+  // Deliberately reads `Date.now()` directly rather than through `$state`/
+  // `$derived` — Svelte only re-runs a template expression when one of ITS
+  // OWN reactive reads changes, and `line.freshAt` (once set) never changes
+  // again, so this expression naturally evaluates exactly once: whenever
+  // this specific line's DOM node is first created. For a newly-appended
+  // live line that's the moment it's born — `now` is fresh, `.bloom` applies,
+  // and the browser plays the animation on that brand-new node exactly like
+  // any element rendered with an animating class already on it. For an
+  // OLDER line rendered again because the whole pane remounted (switching
+  // the view away and back — RunView/OutputPane are destroyed and recreated,
+  // not merely re-rendered), that's the moment its DOM node is (re)created
+  // in the new mount, but `now - line.freshAt` is by then long past
+  // `BLOOM_RECENT_MS`, so it correctly comes out false — no re-bloom of
+  // history. A bare boolean stamped once at append time couldn't make this
+  // distinction: it wouldn't know how long ago "fresh" happened by the time
+  // a remount asks again.
+  function isBloomFresh(line: OutputLine): boolean {
+    return line.freshAt !== undefined && Date.now() - line.freshAt < BLOOM_RECENT_MS;
+  }
 </script>
 
 <div class="output mono pult-screen pult-crt-glow" class:dim bind:this={containerEl} onscroll={onScroll}>
@@ -99,7 +136,7 @@
   {/if}
   {#each lines as line, i (i)}
     {#if line.stream === "stdout" || line.stream === "stderr"}
-      <span class="line {line.stream}">
+      <span class="line {line.stream}" class:bloom={isBloomFresh(line)}>
         {#each parseAnsiLine(line.text) as seg, si (si)}
           <span style={segmentStyle(seg)}>{seg.text}</span>
         {/each}
@@ -171,6 +208,44 @@
     word-break: break-word;
     line-height: 1.5;
     font-size: 11.5px;
+  }
+
+  /* Phosphor persistence bloom (design backlog, `isBloomFresh` above): a
+     freshly-drawn live line flashes brighter than the standing phosphor
+     level, then settles — the optical twin of the cooling fade below, at
+     the opposite end of a line's life (drawn vs. going stale). `filter:
+     brightness` rather than `color`/`opacity` so it composes for free with
+     everything already layered on a line: it's a property nothing else
+     here touches, it visually brightens the ANSI segments nested inside
+     (`filter` affects an element's whole rendered subtree, not just its own
+     box, so the colored spans from `segmentStyle` above brighten right
+     along with the line's own ink), and it doesn't fight the `.dim`/cooling
+     opacity transition below if a run happens to finish moments after its
+     last line bloomed (independent properties, same element). `text-shadow`
+     uses `currentColor` rather than a literal — it's an inherited property,
+     so an ANSI-colored child span (which sets its own `color` but no
+     `text-shadow`) still glows in ITS own color, not the line's default ink,
+     while a plain stdout/stderr span glows in the line's own phosphor/red.
+     No font-weight/size change — only glow, so nothing reflows.
+     Short (~350ms) and one-shot per element: applying `.bloom` to a brand
+     new DOM node plays the animation from its start the moment the node is
+     inserted, exactly like a node created with any other animating class
+     already on it — no JS-driven restart needed. Reduced motion is handled
+     globally (global.css's `prefers-reduced-motion` block collapses every
+     animation-duration to near zero), so no local override is needed here. */
+  .line.bloom {
+    animation: line-bloom 350ms ease-out;
+  }
+
+  @keyframes line-bloom {
+    from {
+      filter: brightness(1.6);
+      text-shadow: 0 0 6px currentColor;
+    }
+    to {
+      filter: brightness(1);
+      text-shadow: 0 0 0 transparent;
+    }
   }
 
   /* Phosphor palette (crt.css's `--crt-*` custom properties, inherited from

@@ -108,7 +108,23 @@
   // `tail_start`) simply never fences anything. Stored per-entry here rather
   // than on `RunRecord` — it's routing bookkeeping for the shared
   // subscription, not part of the record a view renders.
-  const activeTails = new Map<string, { apply: (event: RunEvent) => void; gen: number | null }>();
+  //
+  // `tailStartedAt` (the phosphor-bloom feature's freshness clock — see
+  // `OutputLine.freshAt`'s doc comment and `LIVE_LINE_TAIL_AGE_MS` below) is
+  // stamped at registration time everywhere an entry is created (both here
+  // and in `startTail`) so it always has SOME baseline, then overwritten with
+  // a more accurate value the moment a genuine `tail_start` is adopted (see
+  // `applyEvent`'s `tail_start` case) — that's the real replay-start instant
+  // for a backend that actually emits one. The registration-time baseline is
+  // load-bearing, not just a fallback, for the mock's app-started runs: its
+  // `runCommand` drives a script's events straight into `emitRunOutput`
+  // without ever emitting `tail_start` at all (see backend.ts's
+  // `drivingRuns`), so that path's entry keeps this stamp for its whole
+  // lifetime.
+  const activeTails = new Map<
+    string,
+    { apply: (event: RunEvent) => void; gen: number | null; tailStartedAt: number }
+  >();
 
   // Per-device "is a run of mine now visible in the journal that I've never
   // seen before" polling — see `pollRuns` below. Only the currently active
@@ -391,6 +407,22 @@
     }
   }
 
+  // Phosphor persistence bloom (design backlog) — see `OutputLine.freshAt`'s
+  // doc comment for the field this drives. A tail's initial backlog replay
+  // (whether a genuinely-live run's own recent-past catch-up, or a lazily-
+  // tailed/hydrated finished run's whole history) lands in one fast burst
+  // right after its tail starts; actual live-arriving stdout/stderr has real
+  // command-execution pacing between lines. 800ms is comfortably past any
+  // realistic replay-burst duration (mock and real alike) while still being
+  // well inside the gap a human would notice between "just switched to this
+  // command" and "the command is now actually doing something new" — so a
+  // "line" event is only ever marked fresh once it's clearly on the live side
+  // of that gap. Only ever consulted alongside the record's own `running`
+  // flag (see `applyEvent`'s "line" case below) — a lazily-tailed/hydrated
+  // FINISHED run's record is never `running` while its backlog replays, so
+  // this timing check only ever matters for a run that's still going.
+  const LIVE_LINE_TAIL_AGE_MS = 800;
+
   // Builds the same patch-run/finish/apply-event closures `handleRun` uses
   // for a run it starts itself, parameterized so hydration/the poll/a lazy
   // tail can drive an *existing* run_id (not one this call minted) through
@@ -410,8 +442,12 @@
       return true;
     }
 
-    function appendLine(line: OutputLine) {
-      patchRun((current) => ({ ...current, lines: [...current.lines, line] }));
+    // Takes a builder rather than a plain `OutputLine` — the "line" case
+    // below needs the record's own `running` flag (only available inside
+    // `patchRun`'s callback, at patch time) to decide whether this line gets
+    // stamped `freshAt` (see `LIVE_LINE_TAIL_AGE_MS`'s doc comment).
+    function appendLine(build: (current: RunRecord) => OutputLine) {
+      patchRun((current) => ({ ...current, lines: [...current.lines, build(current)] }));
     }
 
     function updateRecord(
@@ -484,7 +520,7 @@
 
     function applyEvent(event: RunEvent) {
       switch (event.kind) {
-        case "tail_start":
+        case "tail_start": {
           // Fix round 2's in-band reset: a fresh tail always starts
           // replaying from offset 0, so whatever this record already
           // accumulated from a PREVIOUS generation's tail must be cleared
@@ -500,9 +536,32 @@
             progress: null,
             status: null,
           }));
+          // Phosphor-bloom freshness clock (see `LIVE_LINE_TAIL_AGE_MS`'s doc
+          // comment): by construction this only runs for a `tail_start` that
+          // `shouldAcceptEvent` already accepted (the router below gates
+          // `applyEvent` on that), so this really is the tail whose replay is
+          // about to start — a strictly more accurate stamp than whatever
+          // `activeTails.set` guessed at registration time, and worth
+          // re-stamping on every restart (a re-tail replays its backlog from
+          // offset 0 again, so the freshness clock has to restart with it).
+          const entry = activeTails.get(runId);
+          if (entry) entry.tailStartedAt = Date.now();
           break;
+        }
         case "line":
-          appendLine({ stream: event.stream, text: event.text });
+          appendLine((current) => {
+            const now = Date.now();
+            const tailStartedAt = activeTails.get(runId)?.tailStartedAt;
+            const isLive =
+              current.running &&
+              tailStartedAt !== undefined &&
+              now - tailStartedAt > LIVE_LINE_TAIL_AGE_MS;
+            return {
+              stream: event.stream,
+              text: event.text,
+              ...(isLive ? { freshAt: now } : {}),
+            };
+          });
           break;
         case "step":
           patchRun((current) => {
@@ -546,6 +605,7 @@
   // orphaned tail happened to leave off) — call this unconditionally.
   function startTail(path: string, commandId: string, runId: string) {
     const { applyEvent } = makeRunHandlers(path, commandId, runId);
+    const existing = activeTails.get(runId);
     // Fix round 3: preserve the existing entry's adopted gen across a
     // re-registration, rather than resetting it to `null` — this call is a
     // genuine backend restart (see the doc comment above), and the
@@ -555,7 +615,20 @@
     // straggler from the PREVIOUS generation could slip back in as
     // "gen-less" territory for the brief moment before the new tail_start
     // lands).
-    activeTails.set(runId, { apply: applyEvent, gen: activeTails.get(runId)?.gen ?? null });
+    //
+    // `tailStartedAt` (phosphor-bloom freshness clock) is preserved the same
+    // way when an entry already exists — `handleRun` registers one
+    // synchronously before this is ever called (see its own doc comment),
+    // and that registration-time stamp is the one the mock's app-started
+    // runs keep for good (see `activeTails`'s doc comment). Only a call with
+    // no prior entry (hydration, reconcile, a lazy tail) stamps fresh here;
+    // every restart's own `tail_start`, once it arrives, re-stamps it anyway
+    // (see `applyEvent`'s `tail_start` case).
+    activeTails.set(runId, {
+      apply: applyEvent,
+      gen: existing?.gen ?? null,
+      tailStartedAt: existing?.tailStartedAt ?? Date.now(),
+    });
     void tailRun(path, runId);
   }
 
@@ -908,7 +981,18 @@
     // `gen: null` here is purely frontend bookkeeping — the backend hasn't
     // been asked to tail anything yet, so there's no generation to adopt
     // until `startTail` below actually claims one.
-    activeTails.set(runId, { apply: applyEvent, gen: null });
+    //
+    // `tailStartedAt: Date.now()` is this run's phosphor-bloom freshness
+    // clock (see `LIVE_LINE_TAIL_AGE_MS`'s doc comment), stamped right here
+    // at "handler creation" rather than only inside `startTail` below: the
+    // mock backend's `runCommand` (backend.ts) drives an app-started run's
+    // script straight into `emitRunOutput` the moment it's called, gen-less,
+    // with no `tail_start` of its own ever following to re-stamp this later
+    // (see `activeTails`'s doc comment) — this line is the only stamp that
+    // path's lines ever get judged against. `startTail`, called just below
+    // once the spawn resolves, preserves this same value rather than
+    // resetting it.
+    activeTails.set(runId, { apply: applyEvent, gen: null, tailStartedAt: Date.now() });
 
     try {
       await runCommand(path, commandId, values, runId);

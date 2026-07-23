@@ -146,3 +146,9 @@ the mechanics) whenever it isn't blinking (see "Blink = event mode" above —
 a blink suspends this entirely, it never layers on top). Liveness applies
 uniformly: an instrument that stops flickering stops looking powered.
 Reduced-motion collapses all of it to clean steady lamps.
+
+The OUTPUT screen carries its own, line-grained flavor of this: a genuinely
+live-arriving stdout/stderr line flashes brighter than the standing
+phosphor level, then settles over a few hundred ms — replayed backlog never
+flashes, so the screen itself tells "watching it happen" apart from
+"reading history" (see `OutputPane.svelte`'s bloom comments).
