@@ -252,6 +252,47 @@
     transition: opacity 420ms ease;
   }
 
+  /* Cast light joins the blink (user-decision refinement to docs/design-
+     language.md's "Blink is a mode") — verbatim rationale to Meter.svelte's
+     own `.well.glow-success::before`/etc (see that file's comment for the
+     full explanation of reusing the standing opacity formula as the "on"
+     phase, why no `transition: none` is needed, and the reduced-motion
+     collapse), scaled to this well's single size (no `--wash-k` needed —
+     unlike Meter.svelte there's only ever one wash-opacity formula here) and
+     to this page's own blink classes/counts (`.well.blink-success`/
+     `.well.blink-failed`/`.well.blink-stopped` above, SUCCESS_BLINK_COUNT/
+     TOWER_FAILURE_BLINK_COUNT/STOPPED_BLINK_COUNT — same fixed unseeded
+     400ms period as those, no `--blink-duration`/`--blink-delay` needed
+     since only one tower is ever on screen). This is also exactly what the
+     params/stages/output screens' shine-back (crt.css) and the rack
+     sidebar's shine (Rack.svelte) need to mirror — they read the forwarded
+     `blinkKind`/`blinkCount` off `MeterGlowVars` (tower.ts) rather than a
+     class, since neither is a descendant of this well, but the intent and
+     cadence are identical to what's below. */
+  .well.blink-success::before {
+    animation: tower-wash-blink 400ms steps(1, end) 3;
+  }
+
+  .well.blink-failed::before {
+    animation: tower-wash-blink 400ms steps(1, end) 5;
+  }
+
+  .well.blink-stopped::before {
+    animation: tower-wash-blink 400ms steps(1, end) 2;
+  }
+
+  @keyframes tower-wash-blink {
+    0%,
+    45%,
+    100% {
+      opacity: calc(var(--meter-glow-level, 0) * 0.45);
+    }
+    50%,
+    95% {
+      opacity: 0;
+    }
+  }
+
   .well.glow-green {
     --glow: color-mix(in srgb, var(--lamp-green) 60%, transparent);
     --overshoot-color: var(--lamp-green);

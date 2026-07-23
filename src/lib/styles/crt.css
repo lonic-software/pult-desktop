@@ -130,6 +130,47 @@
   transition: background-color 420ms ease, opacity 420ms ease;
 }
 
+/* Blink sync (docs/design-language.md's "Blink is a mode": cast light now
+   flashes in lockstep with the lamp, not just static-on for the blink's
+   duration) — `.run-view[data-blink]` is set by RunView.svelte from
+   `towerGlowVars`'s `blinkKind` (tower.ts) the same reactive tick as the
+   tower's own `.well.blink-*` class, so this animation and the well's start
+   in the same style flush. Reuses the standing rule's own opacity formula
+   as the "on" phase (rather than inventing a new peak) — during a blink
+   `--meter-glow-level` is already pinned to 1 by `TOWER_LEVEL` (tower.ts),
+   so `calc(1 * 0.22)` is exactly this layer's existing ceiling, just now
+   alternating with 0 instead of holding steady. Same 400ms period every one
+   of Tower.svelte's own blink classes uses (unseeded — only one tower is
+   ever on screen) and the same steps(1,end)/0%,45%,100% "on" shape as the
+   well's own `tower-lamp-blink-well`, so reduced motion collapses this to a
+   steady "on" the identical way (see global.css's blanket animation-
+   duration override, which reaches this ::before same as any other).
+   `--blink-count` (also forwarded by RunView) supplies the iteration count,
+   substituted as a bare token — SUCCESS_BLINK_COUNT/TOWER_FAILURE_BLINK_
+   COUNT/STOPPED_BLINK_COUNT (meterLiveness.ts) by way of tower.ts's
+   `MeterGlowVars`, so this can never drift from the well's own count. The
+   animation overrides the base rule's `opacity` transition automatically
+   (a running CSS animation always wins the property over a transition) —
+   no explicit `transition: none` needed — and once the finite count ends,
+   `animation-fill-mode: none`'s default lets the base declaration (and its
+   transition) retake the property, which is what lets the post-blink slew
+   back to standing level read smoothly instead of snapping. */
+.run-view[data-blink] .pult-crt::before {
+  animation: crt-shine-blink 400ms steps(1, end) var(--blink-count, 1);
+}
+
+@keyframes crt-shine-blink {
+  0%,
+  45%,
+  100% {
+    opacity: calc(var(--meter-glow-level, 0) * 0.22);
+  }
+  50%,
+  95% {
+    opacity: 0;
+  }
+}
+
 /* The scrolling child. No positioning/overflow-direction rules here — those
    are per-module (vertical for params/output, horizontal for stages) and
    live with each module's own layout. This only carries what every screen

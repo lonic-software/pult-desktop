@@ -28,6 +28,7 @@
 // between visits.
 
 import type { Readiness } from "./types";
+import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, TOWER_FAILURE_BLINK_COUNT } from "./meterLiveness";
 
 export type TowerState =
   | "ready"
@@ -194,7 +195,25 @@ export function towerDisplay(state: TowerState, progressPct: number | null): Tow
  *
  *  `gray` (no-check) and `none` (untrusted/dark) never glow — same rule as
  *  Tower.svelte's `flickerEligible`: a "no signal" reading shouldn't warm
- *  anything nearby, on the tower or on the glass across the room. */
+ *  anything nearby, on the tower or on the glass across the room.
+ *
+ *  `blinkKind`/`blinkCount` are the doctrine refinement (docs/design-
+ *  language.md's "Blink is a mode": cast light now flashes in lockstep with
+ *  the lamp): the var-driven layers Tower.svelte's own well can't reach by
+ *  class alone — the params/stages/output screens' shine-back (crt.css) and
+ *  Rack.svelte's sidebar shine, both siblings of the tower reading only
+ *  these forwarded custom properties — need to know not just the color/
+ *  level but WHETHER a blink is live and how many pulses it has left, so
+ *  they can swap their static level-driven opacity for a sharp on/off pulse
+ *  at the exact same period/count as the tower's own `.well.blink-*`
+ *  animations instead of drifting out of phase with a second, independently
+ *  guessed cadence. Derived straight from `display.state` (the three blink
+ *  variants are exhaustive and already carry their own iteration count in
+ *  Tower.svelte's stylesheet — `TOWER_BLINK_COUNT` below is the single place
+ *  those counts are mirrored into JS) rather than threaded through as a
+ *  separate parameter, so this can never disagree with what `towerStateFor`
+ *  already decided. `null`/`0` outside a blink — consumers render exactly as
+ *  before then, unchanged by this addition. */
 export interface MeterGlowVars {
   /** A CSS color (one of the existing lamp tokens, or `transparent`) — never
    *  a literal hex, so it already tracks the light/dark theme the same way
@@ -204,15 +223,46 @@ export interface MeterGlowVars {
    *  (the ambient wash's `color-mix` percentage, the screen reflection's
    *  `opacity`) each apply their own modest ceiling on top of this. */
   level: number;
+  /** Non-null while the tower is in a blink event mode — the event kind
+   *  driving which of Tower.svelte's `.well.blink-*` classes is live right
+   *  now. Consumers only need this to know THAT a blink is live (the color
+   *  above is already the right event color); kept as the kind rather than
+   *  a bare boolean since it's occasionally useful for debugging/attribute
+   *  selectors to see which one. */
+  blinkKind: "success" | "run-failed" | "run-stopped" | null;
+  /** The blink's `animation-iteration-count` — mirrors Tower.svelte's own
+   *  `.well.blink-success`/`.well.blink-failed`/`.well.blink-stopped` counts
+   *  (SUCCESS_BLINK_COUNT/TOWER_FAILURE_BLINK_COUNT/STOPPED_BLINK_COUNT)
+   *  exactly, so a var-driven layer's pulse count can never drift from the
+   *  lamp's own. `0` when `blinkKind` is null (unused then — the tower's
+   *  blink is always finite, unlike the board's latched run-failed, so
+   *  there's no "infinite" case a var-driven layer here ever needs). */
+  blinkCount: number;
 }
 
+const TOWER_BLINK_KIND: Partial<Record<TowerState, MeterGlowVars["blinkKind"]>> = {
+  "blink-success": "success",
+  "blink-run-failed": "run-failed",
+  "blink-run-stopped": "run-stopped",
+};
+
+const TOWER_BLINK_COUNT: Partial<Record<TowerState, number>> = {
+  "blink-success": SUCCESS_BLINK_COUNT,
+  "blink-run-failed": TOWER_FAILURE_BLINK_COUNT,
+  "blink-run-stopped": STOPPED_BLINK_COUNT,
+};
+
 export function towerGlowVars(display: TowerDisplay): MeterGlowVars {
-  if (display.color === "gray" || display.color === "none") return { color: "transparent", level: 0 };
+  const blinkKind = TOWER_BLINK_KIND[display.state] ?? null;
+  const blinkCount = blinkKind ? (TOWER_BLINK_COUNT[display.state] ?? 0) : 0;
+  if (display.color === "gray" || display.color === "none") {
+    return { color: "transparent", level: 0, blinkKind: null, blinkCount: 0 };
+  }
   const color =
     display.color === "green"
       ? "var(--lamp-green)"
       : display.color === "red"
         ? "var(--lamp-red)"
         : "var(--accent)"; // amber
-  return { color, level: display.level };
+  return { color, level: display.level, blinkKind, blinkCount };
 }

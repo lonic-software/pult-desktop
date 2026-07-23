@@ -39,7 +39,14 @@ One rule per dimension:
   suspends entirely, and every segment alternates together between fully dim
   and fully lit in the event color, sharp on/off, no fade. Only three things
   ever blink — success, a failed run, and a stop — and only failure latches
-  (see below).
+  (see below). The light the instrument casts on its surroundings — the
+  ambient wash behind the well, the CRT screens' glass shine-back, the rack
+  sidebar's shine — is part of the same mode, not a separate decision: while
+  the lamp blinks, its cast light blinks with it, same sharp on/off, same
+  cadence, same phase, same event color. The rest of the time (every solid
+  state) that cast light is exactly as static as the lamp itself — a wash
+  that idly pulsed on its own would read as texture the lamp doesn't have,
+  which is exactly the confusion "blink is signal" below exists to prevent.
 
 ## State table
 

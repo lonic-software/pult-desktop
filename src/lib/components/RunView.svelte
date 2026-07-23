@@ -301,12 +301,16 @@
   const towerState = $derived(towerStateFor(readiness, towerRunInput, towerBlink));
   const towerDisplayValue = $derived(towerDisplay(towerState, run?.progress?.pct ?? null));
 
-  // Visual-polish addendum (docs/design-language.md's "Analog liveness"):
-  // the tower's ambient wash (Tower.svelte's `.well::before`) and the
-  // params/stages/output screens' glass "shine-back" reflection (crt.css's
-  // `.pult-crt::before`) both read these two custom properties, set here
-  // (not on the tower itself) because this is the one ancestor shared by
-  // both — see tower.ts's `towerGlowVars` doc comment.
+  // Visual-polish addendum (docs/design-language.md's "Analog liveness" and
+  // "Blink is a mode"): the tower's ambient wash (Tower.svelte's
+  // `.well::before`) and the params/stages/output screens' glass
+  // "shine-back" reflection (crt.css's `.pult-crt::before`) both read these
+  // custom properties, set here (not on the tower itself) because this is
+  // the one ancestor shared by both — see tower.ts's `towerGlowVars` doc
+  // comment, including the `blinkKind`/`blinkCount` fields that let the
+  // screens' shine (and, via `onGlowChange` below, the rack sidebar's) pulse
+  // in lockstep with the tower's own blink instead of just sitting at a
+  // static full level for the blink's duration.
   const meterGlow = $derived(towerGlowVars(towerDisplayValue));
 
   // Rack.svelte's sidebar shine-back (visual-polish addendum, same family
@@ -325,7 +329,7 @@
     onGlowChange?.(meterGlow);
   });
   onDestroy(() => {
-    onGlowChange?.({ color: "transparent", level: 0 });
+    onGlowChange?.({ color: "transparent", level: 0, blinkKind: null, blinkCount: 0 });
   });
 
   // ---------------------------------------------------------------------
@@ -408,7 +412,8 @@
 
 <div
   class="run-view"
-  style="--meter-glow-color: {meterGlow.color}; --meter-glow-level: {meterGlow.level}"
+  data-blink={meterGlow.blinkKind ?? undefined}
+  style="--meter-glow-color: {meterGlow.color}; --meter-glow-level: {meterGlow.level}; --blink-count: {meterGlow.blinkCount}"
 >
   <div class="module tower-module">
     <span class="screw screw-tl" aria-hidden="true"></span>
@@ -577,6 +582,17 @@
        app chrome. */
     isolation: isolate;
   }
+
+  /* `data-blink` (set above from `meterGlow.blinkKind`) is the attribute
+     crt.css's `.pult-crt::before` selects on (`.run-view[data-blink] .pult-
+     crt::before`) to swap its static level-driven opacity for a synced
+     on/off pulse — see tower.ts's `MeterGlowVars` doc comment. Rack.svelte's
+     sidebar shine needs the same signal but isn't a descendant of this root
+     — it reads the identical attribute/vars forwarded onto +page.svelte's
+     `.body` instead, via this page's `onGlowChange` (see that prop's doc
+     comment on RunView's Props). No rule needed on `.run-view` itself here;
+     `--meter-glow-color`/`--meter-glow-level`/`--blink-count` above are the
+     only things the screens actually read. */
 
   /* Module faceplate — same visual language as Board.svelte's `.module`
      (hairline frame, emboss + drop shadow, corner screws), reproduced here

@@ -244,10 +244,16 @@
   // Ambient wash (visual-polish addendum to docs/design-language.md's
   // "Analog liveness"): a second, much larger and much subtler glow layer
   // behind the well — "the wall behind a VU meter in a dark studio" — that
-  // colors the card/module around the meter. Unlike the flicker/breathe
-  // system above, this layer never animates on a keyframe: it only ever
-  // moves via a slow CSS `transition` (see `.well::before` below), so it
-  // reads as the room settling into a new light level, not more texture.
+  // colors the card/module around the meter. Outside a blink, this layer
+  // never animates on a keyframe: it only ever moves via a slow CSS
+  // `transition` (see `.well::before` below), so it reads as the room
+  // settling into a new light level, not more texture. During a blink
+  // (success/run-failed/stopped) it's the opposite — the cast light flashes
+  // in lockstep with the lamp, sharp on/off, same duration/delay/iteration-
+  // count as the well's own `lamp-blink-well` (see `.well.glow-success::
+  // before`/`.well.glow-stopped::before`/`.well.glow-run-failed::before`
+  // further down) — a refinement to the "static wash" doctrine, not a
+  // contradiction of it: outside blink it's exactly as static as before.
   // Self-contained to this component (the vars are set and consumed on the
   // same `.well` element, `.well::before` just inherits them) since the
   // board has no nearby surface to reflect onto — contrast RunView's tower,
@@ -416,13 +422,22 @@
        reaching back behind the well's own segments — see `.segments`'
        z-index below for how those stay legible on top of it. */
     z-index: 1;
+    /* `--wash-k` (0.28 here, 0.4 on `.well.lg::before` just below) is the
+       one number that differs between the two sizes' opacity formula — held
+       as a custom property, not just inlined into each `calc()`, so the
+       blink-sync `wash-blink` keyframe further down can share one definition
+       across both sizes instead of needing a size-specific copy: it reads
+       whichever `--wash-k` is in scope on the element it's actually
+       animating, the same way `--tint` already lets one `lamp-blink-seg`
+       keyframe serve success/stopped/run-failed without a copy per color. */
+    --wash-k: 0.28;
     background: radial-gradient(
       ellipse closest-side at center,
       var(--meter-glow-color, transparent) 0%,
       color-mix(in srgb, var(--meter-glow-color, transparent) 42%, transparent) 45%,
       transparent 100%
     );
-    opacity: calc(var(--meter-glow-level, 0) * 0.28);
+    opacity: calc(var(--meter-glow-level, 0) * var(--wash-k));
     transition: opacity 420ms ease;
   }
 
@@ -434,13 +449,14 @@
      them via the cascade (it used to only re-declare `inset`). */
   .well.lg::before {
     inset: -110px;
+    --wash-k: 0.4;
     background: radial-gradient(
       ellipse closest-side at center,
       var(--meter-glow-color, transparent) 0%,
       color-mix(in srgb, var(--meter-glow-color, transparent) 60%, transparent) 45%,
       transparent 100%
     );
-    opacity: calc(var(--meter-glow-level, 0) * 0.4);
+    opacity: calc(var(--meter-glow-level, 0) * var(--wash-k));
   }
 
   .well.glow-running {
@@ -535,6 +551,62 @@
     --glow: color-mix(in srgb, var(--lamp-red) 75%, transparent);
     animation: lamp-blink-well var(--blink-duration, 600ms) steps(1, end) infinite;
     animation-delay: var(--blink-delay, 0ms);
+  }
+
+  /* Cast light joins the blink (user-decision refinement to docs/design-
+     language.md's "Blink is a mode": the ambient wash isn't just static
+     during an event anymore, it flashes with the lamp). Same three classes,
+     same durations/delays/iteration-counts as the well's own
+     `lamp-blink-well` just above — success/stopped are the fixed unseeded
+     400ms/3-and-2, run-failed reuses this card's own seeded
+     `--blink-duration`/`--blink-delay` (meterLiveness.ts's `blinkTiming`) so
+     the wash's pulse never drifts out of phase with this specific card's
+     latch. One shared keyframe (`wash-blink`, right below) rather than a
+     copy per state — it only ever needs `--meter-glow-level`/`--wash-k`,
+     both already in scope, the same way `--glow`/`--tint` already let one
+     keyframe serve three colors elsewhere in this file.
+
+     The "on" phase reuses this element's own standing opacity formula
+     (`calc(level * wash-k)`) rather than a new invented peak: while blinking
+     `ambientLevel` (script block) is pinned to 1 (`litCount` forced to the
+     full 5), so that calc is already this wash's full-strength ceiling —
+     the blink just alternates it with 0 instead of holding it steady. No
+     `transition: none` needed: a running CSS animation always wins the
+     property it drives over a transition on that same property, so
+     `.well::before`'s own `transition: opacity 420ms ease` is automatically
+     suspended for as long as this animation is live and resumes the instant
+     it isn't (an iteration-count of `infinite` never releases it, matching
+     the latch never clearing on its own; success/stopped's finite counts
+     release it back to the transition, which is what lets the post-blink
+     recovery ease smoothly instead of popping). Reduced motion: same
+     collapse as every other animation in this file (global.css's blanket
+     `animation-duration` override reaches this ::before same as any
+     other) — 0%/45%/100% is the "on" frame, so it degrades to a steady lit
+     wash in lockstep with the well's own steady-solid degradation, never a
+     frozen half-blink. */
+  .well.glow-success::before {
+    animation: wash-blink 400ms steps(1, end) 3;
+  }
+
+  .well.glow-stopped::before {
+    animation: wash-blink 400ms steps(1, end) 2;
+  }
+
+  .well.glow-run-failed::before {
+    animation: wash-blink var(--blink-duration, 600ms) steps(1, end) infinite;
+    animation-delay: var(--blink-delay, 0ms);
+  }
+
+  @keyframes wash-blink {
+    0%,
+    45%,
+    100% {
+      opacity: calc(var(--meter-glow-level, 0) * var(--wash-k, 0.28));
+    }
+    50%,
+    95% {
+      opacity: 0;
+    }
   }
 
   @keyframes lamp-blink-well {

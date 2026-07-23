@@ -223,6 +223,35 @@
     transition: background-color 420ms ease, opacity 420ms ease;
   }
 
+  /* Blink sync (docs/design-language.md's "Blink is a mode") — verbatim
+     rationale to crt.css's `.run-view[data-blink] .pult-crt::before` (see
+     its comment for the full explanation of the shared 400ms/steps(1,end)
+     cadence, why the "on" phase reuses this layer's own existing 0.14
+     ceiling rather than a new peak, why no explicit `transition: none` is
+     needed, and the reduced-motion collapse), mirrored here for the one
+     other var-driven layer that can't read the tower's blink by class:
+     `data-blink`/`--blink-count` arrive on +page.svelte's `.body` (this
+     component's own parent, not something Rack.svelte sets itself — see
+     that file's `bodyGlow` and RunView's `onGlowChange` doc comments), so
+     the selector below reaches up past this component's own scoping via
+     `:global()` the same way the vars themselves already do. */
+  :global(.body[data-blink]) .rack::after,
+  :global(.body[data-blink]) .rack-collapsed::after {
+    animation: rack-shine-blink 400ms steps(1, end) var(--blink-count, 1);
+  }
+
+  @keyframes rack-shine-blink {
+    0%,
+    45%,
+    100% {
+      opacity: calc(var(--meter-glow-level, 0) * 0.14);
+    }
+    50%,
+    95% {
+      opacity: 0;
+    }
+  }
+
   .expand {
     flex: none;
     width: 100%;

@@ -69,13 +69,16 @@
   // `towerBlink` override is timed, component-local state), so this is fed
   // via its `onGlowChange` callback rather than recomputed here from a
   // second copy of the same inputs — see that prop's doc comment for why a
-  // second computation could disagree (blink timing especially). Defaults
-  // to inert so the board view — which never mounts RunView, and
-  // deliberately gets NO sidebar shine at all (many independent glow
-  // sources across the board's cards, no single aggregate signal the way
-  // the details page's one tower is) — always renders `.body` with the
-  // vars unset/zeroed, same as this starting value.
-  let bodyGlow: MeterGlowVars = $state({ color: "transparent", level: 0 });
+  // second computation could disagree (blink timing especially, now that
+  // `MeterGlowVars` also carries `blinkKind`/`blinkCount` — see tower.ts —
+  // for the synced on/off pulse docs/design-language.md's "Blink is a mode"
+  // now demands from this sidebar too). Defaults to inert so the board
+  // view — which never mounts RunView, and deliberately gets NO sidebar
+  // shine at all (many independent glow sources across the board's cards,
+  // no single aggregate signal the way the details page's one tower is) —
+  // always renders `.body` with the vars unset/zeroed, same as this
+  // starting value.
+  let bodyGlow: MeterGlowVars = $state({ color: "transparent", level: 0, blinkKind: null, blinkCount: 0 });
 
   // Paths where the user clicked "Not now" on the trust modal this session —
   // suppresses re-prompting on every switch back to that device. Read only
@@ -1088,7 +1091,8 @@
 
   <div
     class="body"
-    style="--meter-glow-color: {bodyGlow.color}; --meter-glow-level: {bodyGlow.level}"
+    data-blink={bodyGlow.blinkKind ?? undefined}
+    style="--meter-glow-color: {bodyGlow.color}; --meter-glow-level: {bodyGlow.level}; --blink-count: {bodyGlow.blinkCount}"
   >
     <Rack
       {devices}
