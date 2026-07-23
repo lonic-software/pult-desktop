@@ -222,9 +222,15 @@
       0 1px 3px rgba(0, 0, 0, 0.28);
   }
 
+  /* `top`, not `transform`: a transform on the hovered card would open a new
+     stacking context, re-trapping the meter's ambient wash (Meter.svelte
+     .well::before, z-index: 1) inside the card instead of letting it escape
+     to the .rack layer above neighboring cards. `.card` is already
+     `position: relative` with the default `z-index: auto`, so nudging via
+     `top` gets the identical 1px press look without that side effect. */
   .card:hover,
   .card:active {
-    transform: translateY(1px);
+    top: 1px;
     box-shadow:
       inset 0 1px 0 var(--emboss-light),
       0 1px 1px rgba(0, 0, 0, 0.2);

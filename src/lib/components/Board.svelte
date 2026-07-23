@@ -186,6 +186,23 @@
     gap: var(--space-4);
     align-items: start;
     justify-content: start;
+    /* Ambient-wash z-order fix (visual bug: Meter.svelte's `.well::before`
+       wash bled out past its own card but got fully painted over by
+       whichever neighboring card/module happened to sit there, reading as
+       light trapped *under* the board instead of falling on top of it — see
+       that file's `.well::before` comment for the full stacking-context
+       diagnosis and why the fix lives on both ends: this `isolation` plus
+       the wash's own `z-index` there). A new stacking context here, rather
+       than on the `.card` this wash is inside, is what lets EVERY card's
+       wash — not just the one whose own card happens to be later in DOM
+       order than its neighbor's — escape into the same shared layer above
+       every module/card's opaque chrome in the rack; the alternative (a
+       z-index on the glowing card itself) still ties among simultaneously-
+       glowing *adjacent* cards, which is most of a real board, so it barely
+       moved the bug. Scoped to `.rack` rather than the page root so this
+       never reaches past the board into unrelated chrome (the search bar,
+       the device rack sidebar, etc.). */
+    isolation: isolate;
   }
 
   /* Module faceplate: hairline frame, emboss + drop shadow, four corner

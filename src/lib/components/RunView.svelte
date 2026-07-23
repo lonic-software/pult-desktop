@@ -518,6 +518,15 @@
     /* No document scroll on this page — see the file-level comment. Every
        inner module caps itself and scrolls its own content instead. */
     overflow: hidden;
+    /* Ambient-wash z-order fix (see Tower.svelte's `.well::before` comment
+       for the full stacking-context diagnosis): a new stacking context
+       rooted here is what lets the tower's wash, once it's given its own
+       z-index there, escape past the tower module and paint above
+       `.right-col`'s params/stages/output modules instead of getting
+       painted over by them — scoped to this page root rather than left to
+       escape further, so it can't reach past this component into unrelated
+       app chrome. */
+    isolation: isolate;
   }
 
   /* Module faceplate — same visual language as Board.svelte's `.module`

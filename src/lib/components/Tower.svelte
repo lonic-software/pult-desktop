@@ -217,6 +217,22 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
+    /* Visual bug fix, not a visual change: same stacking-context trap as
+       Meter.svelte's `.well::before` (see its comment for the full
+       diagnosis) — nothing from here up through `.tower`/`.tower-module` to
+       RunView's `.run-view` root ever set a z-index, so plain DOM-order
+       paint let `.right-col`'s params/stages/output modules (later in the
+       markup, across the grid gap) paint over this wash instead of it
+       falling on top of them. `z-index` here, paired with `.run-view`'s new
+       `isolation: isolate`, promotes the wash into its own stacking context
+       that escapes the tower module and paints above every module on the
+       page — this is the one page with only a single glow source, so unlike
+       the board's many cards (Meter.svelte) there's no same-z-index
+       neighbor to tie-break against. `pointer-events: none` above already
+       keeps this from ever blocking a click, and the tower's own segments
+       are unaffected the same way Meter.svelte's are — this pseudo-element
+       has no fill, only the shadow it casts outside its own box. */
+    z-index: 1;
     box-shadow: 0 0 120px 16px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 32%), transparent);
     transition: box-shadow 420ms ease;
   }

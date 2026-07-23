@@ -359,6 +359,28 @@
     position: absolute;
     inset: 0;
     pointer-events: none;
+    /* Visual bug fix, not a visual change: this wash is meant to read as
+       light falling ON the surrounding card/module, but with every
+       ancestor up to Board.svelte's `.rack` being `position: relative`/
+       static and z-index:auto (no stacking contexts anywhere in that
+       chain), plain paint order made it fall *under* whichever neighbor
+       happened to sit in its bleed radius — CSS2.1 Appendix E's stacking
+       order paints step-6 z:auto positioned content in tree order, so a
+       card's wash lost to any later sibling's own opaque background.
+       `z-index` here (paired with `.rack`'s new `isolation: isolate`, the
+       other half of this fix) promotes the wash into its own stacking
+       context that escapes the card entirely and joins every other
+       lit card's wash in one shared layer above ALL of the rack's chrome,
+       regardless of DOM order either direction — the fix has to live on
+       the wash itself, not on the card it's inside, because a z-index on
+       the card only wins against neighbors that *aren't themselves*
+       glowing, and most of a real board's cards are. Doesn't touch this
+       layer's color/size/timing, and `pointer-events: none` above already
+       keeps it from ever blocking a click no matter how high it paints;
+       the well's own LED segments are never at risk either, since this
+       pseudo-element has no fill of its own — only the shadow it casts
+       outside its box — so it can never sit visually on top of them. */
+    z-index: 1;
     box-shadow: 0 0 52px 6px color-mix(in srgb, var(--meter-glow-color, transparent) calc(var(--meter-glow-level, 0) * 28%), transparent);
     transition: box-shadow 420ms ease;
   }
