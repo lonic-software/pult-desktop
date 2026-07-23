@@ -1,27 +1,27 @@
 {
   "$comment": "Pins the pult release bundled as this app's sidecar. Bumping the sidecar means editing this one file: update version, then replace every sha256 below with the checksums of the new release's assets (download each asset from https://github.com/lonic-software/pult/releases/tag/v<version> and run `shasum -a 256 <asset>` yourself — don't just copy the release's own checksums.txt, since that only guards against corruption, not a compromised release upload). scripts/fetch-pult-sidecar.mjs reads this file and hard-fails on any mismatch.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "repo": "lonic-software/pult",
   "assets": {
     "aarch64-apple-darwin": {
       "asset": "pult-aarch64-apple-darwin.tar.gz",
-      "sha256": "477a75768eb501742cc72952049cf9e00d31f0ea452bfc1d2aac5214662a0e67"
+      "sha256": "6ba0c5cddcb71d1d851a37d3f5d3b53d30e0e87074177173edaac8aea7fefb95"
     },
     "x86_64-apple-darwin": {
       "asset": "pult-x86_64-apple-darwin.tar.gz",
-      "sha256": "750d36c63cbbc688f2b353cd360a731342eac8befec3c3790bde66b8445330c5"
+      "sha256": "b62f0a3aafa396efc360aa2d1f3fe51a1b70505c3f764ca45939f3f5a48e3e13"
     },
     "x86_64-pc-windows-msvc": {
       "asset": "pult-x86_64-pc-windows-msvc.zip",
-      "sha256": "938792271283d32ff4bd5066966668dda7f180406818be32f656e93eb200b398"
+      "sha256": "88083fa25a6b05ec07b06b04a0239a8573dfddb8aa1d24b57e7f0c53cce8a231"
     },
     "x86_64-unknown-linux-gnu": {
       "asset": "pult-x86_64-unknown-linux-musl.tar.gz",
-      "sha256": "ea33774a677e7036aa8afe58aba962cf4e4204e41a14fe9619700c5d40262cf0"
+      "sha256": "9f3b6c299357689de1d334ced51cbb42269e790c6362ea19b093266fbb5f66bf"
     },
     "aarch64-unknown-linux-gnu": {
       "asset": "pult-aarch64-unknown-linux-musl.tar.gz",
-      "sha256": "c938bc45ca846ba0462cb468f5cb5102024ea7359ef1f51617462678bbfc4e9d"
+      "sha256": "1215decb35b14cd8348e9c6137b057749906024d82993c12bfbf434503c0066a"
     }
   }
 }
