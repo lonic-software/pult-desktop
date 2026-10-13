@@ -369,3 +369,59 @@ impl RunEvent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(doc: &str) -> Result<Result<serde_json::Value, PultError>, String> {
+        parse_document(doc.as_bytes())
+    }
+
+    #[test]
+    fn a_schema_2_document_yields_its_data_or_its_error() {
+        let ok = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":2,"command":"list","ok":true,"data":{"a":1}}"#,
+        );
+        assert_eq!(ok.unwrap().unwrap(), serde_json::json!({"a": 1}));
+
+        let refused = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":2,"command":"list","ok":false,
+                "error":{"code":"trust_changed","message":"m",
+                         "details":{"what_changed":"unexpected"}}}"#,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(refused.code, "trust_changed");
+        assert_eq!(refused.what_changed(), Some("unexpected"));
+    }
+
+    /// pult 0.4: bare success documents and schema-1 error envelopes.
+    #[test]
+    fn another_schema_is_refused_by_name_never_read() {
+        let bare = parse(r#"{"schema":1,"name":"x","manifest":"m","commands":[]}"#).unwrap_err();
+        assert!(bare.contains("schema 1"), "{bare}");
+
+        let old_error = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":1,"command":"list","ok":false,
+                "error":{"code":"no_manifest","message":"m"}}"#,
+        )
+        .unwrap_err();
+        assert!(old_error.contains("schema 1"), "{old_error}");
+
+        let newer = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":3,"command":"list","ok":true,"data":{}}"#,
+        )
+        .unwrap_err();
+        assert!(newer.contains("schema 3"), "{newer}");
+    }
+
+    #[test]
+    fn output_that_is_not_pults_document_is_refused() {
+        assert!(parse("not json").is_err());
+        assert!(parse(
+            r#"{"lonic_json":1,"tool":"forklift","schema":2,"command":null,"ok":true,"data":{}}"#
+        )
+        .is_err());
+    }
+}
