@@ -24,6 +24,11 @@ describe("restoreValue", () => {
     expect(restoreValue(note, "x")).toBe("x");
   });
 
+  it("never restores a secret, even one remembered before it became secret", () => {
+    expect(restoreValue({ ...only, secret: true }, ["tok"])).toEqual([]);
+    expect(restoreValue({ name: "t", kind: "input", secret: true }, "tok")).toBe("");
+  });
+
   it("drops a remembered value whose type no longer fits the kind", () => {
     expect(restoreValue(flag, "true")).toBe(false);
     expect(restoreValue(only, "a")).toEqual([]);
@@ -62,10 +67,15 @@ describe("runBlocker", () => {
   });
 
   it("checks a repeat's count against its bounds, blank rows not counted", () => {
-    expect(runBlocker([files], { files: [""] })).toBe("files needs at least 1 value.");
+    expect(runBlocker([files], { files: ["", " "] })).toBe("files needs at least 1 value.");
     expect(runBlocker([only, files], { only: ["a", "b", "c"], files: ["x"] })).toBe(
       "only takes at most 2 values.",
     );
     expect(runBlocker([only, files], { only: ["a"], files: ["x"] })).toBeNull();
+  });
+
+  it("needs a value for a required pick or input, not for a defaulted one", () => {
+    expect(runBlocker([env, note], { env: " ", note: "" })).toBe("env needs a value.");
+    expect(runBlocker([env, note], { env: "dev", note: "" })).toBeNull();
   });
 });

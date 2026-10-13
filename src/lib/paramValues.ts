@@ -25,8 +25,10 @@ export function initialValue(param: Param): ParamValue {
 }
 
 /** A remembered value, if it still has the type this param's kind takes
- *  (the manifest may have changed the kind since); else the initial value. */
+ *  (the manifest may have changed the kind since); else the initial value.
+ *  A secret is never restored, even one remembered before it became secret. */
 export function restoreValue(param: Param, remembered: ParamValue | undefined): ParamValue {
+  if (param.secret) return initialValue(param);
   const fits =
     param.kind === "flag"
       ? typeof remembered === "boolean"
@@ -57,9 +59,10 @@ export function textOf(value: ParamValue | undefined): string {
 }
 
 /** A repeat's items as they are sent: blank rows are rows the operator
- *  added and never filled, not empty items. */
+ *  added and never filled, not items — the same blank a pick or input's
+ *  required check uses. */
 function items(value: ParamValue | undefined): string[] {
-  return Array.isArray(value) ? value.filter((item) => item !== "") : [];
+  return Array.isArray(value) ? value.filter((item) => item.trim() !== "") : [];
 }
 
 /** The values `run_command` sends, typed by kind. */
@@ -80,6 +83,10 @@ export function runBlocker(params: Param[], values: Record<string, ParamValue>):
     return `This pult-desktop can't fill ${names} — update it, or run the command in a terminal.`;
   }
   for (const param of params) {
+    if ((param.kind === "pick" || param.kind === "input") && !isOptional(param)) {
+      if (!textOf(values[param.name]).trim()) return `${param.name} needs a value.`;
+      continue;
+    }
     if (param.kind !== "repeat") continue;
     const count = items(values[param.name]).length;
     const min = param.min ?? 0;

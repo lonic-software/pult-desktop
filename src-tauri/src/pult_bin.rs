@@ -241,7 +241,8 @@ fn trust_error(error: PultError) -> String {
              Review it again."
                 .to_string()
         }
-        _ => format!("Couldn't trust this repository: {}", listing_error(error)),
+        ("no_manifest" | "invalid_manifest" | "fetch_failed", _) => listing_error(error),
+        _ => format!("Couldn't trust this repository: {}", error.message),
     }
 }
 

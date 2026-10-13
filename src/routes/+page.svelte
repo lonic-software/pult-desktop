@@ -568,7 +568,15 @@
         case "step":
           patchRun((current) => {
             const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
-            return { ...current, step, stepHistory: [...current.stepHistory, step] };
+            // A new step starts with no figure of its own, and the run moves
+            // to the start of that step's band, as pult's own bar does.
+            const banded = event.k >= 1 && event.k <= event.n;
+            const progress = {
+              pct: banded ? Math.round(((event.k - 1) * 100) / event.n) : (current.progress?.pct ?? null),
+              stepPct: null,
+              text: null,
+            };
+            return { ...current, step, progress, stepHistory: [...current.stepHistory, step] };
           });
           break;
         case "progress":
@@ -794,6 +802,7 @@
     stopActivePoll();
     repoPath = path;
     listingError = null;
+    trustNotice = null;
     listing = null;
     doctorReport = null;
     selectedId = null;
@@ -903,11 +912,17 @@
     trustBusy = true;
     try {
       await trustRepo(path, listing.trust_hash);
-      trustNotice = null;
-      await loadRepo(path);
+      if (repoPath === path) await loadRepo(path);
     } catch (e) {
-      await loadRepo(path);
-      trustNotice = String(e);
+      // The operator may have moved to another device meanwhile: the
+      // refusal is about this one, so it never pulls them back.
+      if (repoPath === path) {
+        await loadRepo(path);
+        if (repoPath === path) {
+          if (showTrustModal) trustNotice = String(e);
+          else if (!listing) listingError = `${e}\n${listingError ?? ""}`.trim();
+        }
+      }
     }
     trustBusy = false;
   }
