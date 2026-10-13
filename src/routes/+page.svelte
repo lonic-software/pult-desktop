@@ -22,6 +22,7 @@
     DoctorReport,
     Listing,
     OutputLine,
+    ParamValue,
     RackDevice,
     RunEvent,
     RunRecord,
@@ -49,6 +50,7 @@
   let selectedId: string | null = $state(null);
   let view: "board" | "run" = $state("board");
   let showTrustModal = $state(false);
+  let trustNotice: string | null = $state(null);
   let trustBusy = $state(false);
   let showSettings = $state(false);
   let pultPathSetting: string | null = $state(null);
@@ -141,7 +143,7 @@
   // active device's slice, which is what the board/run view render.
   let runsByRepo: Record<string, Record<string, RunRecord>> = $state({});
   let overridesByRepo: Record<string, Record<string, BoardMeterOverride | null>> = $state({});
-  let paramValuesByRepo: Record<string, Record<string, Record<string, string>>> = $state({});
+  let paramValuesByRepo: Record<string, Record<string, Record<string, ParamValue>>> = $state({});
 
   const runs: Record<string, RunRecord> = $derived(
     repoPath ? (runsByRepo[repoPath] ?? {}) : {},
@@ -153,7 +155,7 @@
   // disk persistence (loadParamValues) on open and writes non-secret edits
   // back (saveParamValue), which is what the parameters module's
   // "remembered per repo" footer note promises — see RunView.
-  const paramValues: Record<string, Record<string, string>> = $derived(
+  const paramValues: Record<string, Record<string, ParamValue>> = $derived(
     repoPath ? (paramValuesByRepo[repoPath] ?? {}) : {},
   );
 
@@ -570,7 +572,9 @@
           });
           break;
         case "progress":
-          updateRecord({ progress: { pct: event.pct, text: event.text } });
+          updateRecord({
+            progress: { pct: event.run_pct ?? event.pct, stepPct: event.pct, text: event.text },
+          });
           break;
         case "status":
           updateRecord({ status: event.text });
@@ -890,22 +894,27 @@
     localStorage.setItem("pult-desktop:rack-collapsed", rackCollapsed ? "1" : "0");
   }
 
+  // Pins the hash the modal showed. A refusal (the manifest changed since)
+  // reloads the listing, which reopens the modal on the new content with
+  // the reason above it.
   async function handleTrust() {
-    if (!repoPath) return;
+    if (!repoPath || !listing) return;
+    const path = repoPath;
     trustBusy = true;
     try {
-      await trustRepo(repoPath);
-      showTrustModal = false;
-      await loadRepo(repoPath);
+      await trustRepo(path, listing.trust_hash);
+      trustNotice = null;
+      await loadRepo(path);
     } catch (e) {
-      listingError = String(e);
-      showTrustModal = false;
+      await loadRepo(path);
+      trustNotice = String(e);
     }
     trustBusy = false;
   }
 
   function handleNotNow() {
     showTrustModal = false;
+    trustNotice = null;
     if (repoPath) readOnlyPaths.add(repoPath);
   }
 
@@ -919,7 +928,7 @@
     view = "board";
   }
 
-  async function handleRun(commandId: string, values: Record<string, string>) {
+  async function handleRun(commandId: string, values: Record<string, ParamValue>) {
     if (!repoPath) return;
     // Captured once: every closure below writes through `runsByRepo[path]`
     // rather than the active-device `runs` slice, so this run keeps
@@ -1034,7 +1043,7 @@
     });
   }
 
-  function handleValuesChange(commandId: string, values: Record<string, string>) {
+  function handleValuesChange(commandId: string, values: Record<string, ParamValue>) {
     if (!repoPath) return;
     const forRepo = paramValuesByRepo[repoPath] ?? {};
     paramValuesByRepo = { ...paramValuesByRepo, [repoPath]: { ...forRepo, [commandId]: values } };
@@ -1233,7 +1242,13 @@
   </div>
 
   {#if showTrustModal && listing}
-    <TrustModal {listing} busy={trustBusy} onTrust={handleTrust} onNotNow={handleNotNow} />
+    <TrustModal
+      {listing}
+      busy={trustBusy}
+      notice={trustNotice}
+      onTrust={handleTrust}
+      onNotNow={handleNotNow}
+    />
   {/if}
 
   {#if showSettings}

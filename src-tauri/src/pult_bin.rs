@@ -25,7 +25,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::journal::SpawnOutcomes;
-use crate::types::Listing;
+use crate::types::{parse_document, Listing, PultError};
 
 /// Cap on the stderr `spawn_run`'s reaper buffers per run, keeping the
 /// *tail* on overflow (fix round 2's point fix B) — a usage error or panic
@@ -194,6 +194,70 @@ pub fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_string()
 }
 
+/// Read one `--json` document from a finished pult run: its `data` on
+/// success, or the message `describe` gives a reported failure. Output that
+/// isn't a document at all (a crash, a pult too old for this app) falls back
+/// to pult's stderr. The exit status is never consulted: `doctor` exits 1
+/// with a successful report.
+pub fn read_document<T: serde::de::DeserializeOwned>(
+    output: &Output,
+    describe: impl FnOnce(PultError) -> String,
+) -> Result<T, String> {
+    match parse_document(&output.stdout) {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(error)) => Err(describe(error)),
+        Err(unreadable) => {
+            let stderr = stderr_text(output);
+            Err(if stderr.is_empty() {
+                unreadable
+            } else {
+                format!("{unreadable}: {stderr}")
+            })
+        }
+    }
+}
+
+/// `pult --list --json` in `path`, with its failures in operator words.
+pub async fn list(bin: &PathBuf, path: &str) -> Result<Listing, String> {
+    let output = run_capture(bin, path, &["--list", "--json"], None).await?;
+    read_document(&output, listing_error)
+}
+
+/// Trust a manifest at the hash the human reviewed:
+/// `pult --trust=<hash> --list --json`, with `hash` the listing's
+/// `trust_hash` that the trust modal showed. If the manifest changed since,
+/// pult refuses and records nothing.
+pub async fn trust(bin: &PathBuf, path: &str, hash: &str) -> Result<(), String> {
+    let grant = format!("--trust={hash}");
+    let output = run_capture(bin, path, &[&grant, "--list", "--json"], None).await?;
+    read_document::<Listing>(&output, trust_error).map(|_| ())
+}
+
+/// What a refused trust grant tells the operator, chosen by `code`.
+fn trust_error(error: PultError) -> String {
+    match (error.code.as_str(), error.what_changed()) {
+        ("trust_changed", Some("unexpected")) => {
+            "This repository changed after you reviewed it, so it wasn't trusted. \
+             Review it again."
+                .to_string()
+        }
+        _ => format!("Couldn't trust this repository: {}", listing_error(error)),
+    }
+}
+
+/// What a failed listing tells the operator, chosen by `code`.
+pub fn listing_error(error: PultError) -> String {
+    match error.code.as_str() {
+        "no_manifest" => "No pult.yaml here — point me at a repository that has one".to_string(),
+        "invalid_manifest" => format!("This repository's pult manifest has a problem: {}", error.message),
+        "fetch_failed" => format!(
+            "Couldn't fetch a module this repository includes: {}",
+            error.message
+        ),
+        _ => format!("Couldn't read this repository's commands: {}", error.message),
+    }
+}
+
 /// Resolve a `pick.source` param's live options.
 ///
 /// pult 0.4 has no CLI surface for this: `--print` is explicitly
@@ -223,15 +287,7 @@ pub async fn resolve_pick_source(
     param_name: &str,
     values: &HashMap<String, String>,
 ) -> Result<Vec<String>, String> {
-    let listing_output = run_capture(bin, path, &["--list", "--json"], None).await?;
-    if !listing_output.status.success() {
-        return Err(format!(
-            "Couldn't read this repository's commands: {}",
-            stderr_text(&listing_output)
-        ));
-    }
-    let listing: Listing = serde_json::from_slice(&listing_output.stdout)
-        .map_err(|e| format!("Couldn't read this repository's commands: {e}"))?;
+    let listing = list(bin, path).await?;
 
     if !listing.trusted {
         return Err("Trust this repository before resolving live options.".to_string());
@@ -457,7 +513,7 @@ pub async fn spawn_run(
     bin: &PathBuf,
     dir: &str,
     id: &str,
-    values: &HashMap<String, String>,
+    values: &HashMap<String, serde_json::Value>,
     run_id: &str,
     outcomes: &SpawnOutcomes,
 ) -> Result<(), String> {

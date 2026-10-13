@@ -426,6 +426,7 @@ fn map_event_line(line: &str, run_id: &str) -> Option<RunEvent> {
         "progress" => Some(RunEvent::Progress {
             run_id: run_id.to_string(),
             pct: doc.get("pct").and_then(|v| v.as_u64()).map(|v| v as u8),
+            run_pct: doc.get("run_pct").and_then(|v| v.as_u64()).map(|v| v as u8),
             text: doc
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -1375,7 +1376,10 @@ mod tests {
             &path,
             r#"{"ts":2,"kind":"step","k":1,"n":2,"name":"build"}"#,
         );
-        append_line(&path, r#"{"ts":3,"kind":"progress","pct":50,"text":null}"#);
+        append_line(
+            &path,
+            r#"{"ts":3,"kind":"progress","pct":50,"run_pct":25,"text":null}"#,
+        );
         append_line(
             &path,
             r#"{"ts":4,"kind":"progress","pct":null,"text":"thinking"}"#,
@@ -1401,6 +1405,7 @@ mod tests {
             &events[2],
             RunEvent::Progress {
                 pct: Some(50),
+                run_pct: Some(25),
                 text: None,
                 ..
             }

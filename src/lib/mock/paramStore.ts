@@ -6,7 +6,9 @@
 // calls `saveParamValue` for a `param.secret` field), not re-checked here,
 // same contract the real implementation relies on.
 
-const store = new Map<string, Record<string, string>>();
+import type { ParamValue } from "../types";
+
+const store = new Map<string, Record<string, ParamValue>>();
 
 function key(repoPath: string, commandId: string): string {
   return `${repoPath}\0${commandId}`;
@@ -15,7 +17,7 @@ function key(repoPath: string, commandId: string): string {
 export async function loadParamValues(
   repoPath: string,
   commandId: string,
-): Promise<Record<string, string>> {
+): Promise<Record<string, ParamValue>> {
   return { ...(store.get(key(repoPath, commandId)) ?? {}) };
 }
 
@@ -23,7 +25,7 @@ export async function saveParamValue(
   repoPath: string,
   commandId: string,
   paramName: string,
-  value: string,
+  value: ParamValue,
 ): Promise<void> {
   const k = key(repoPath, commandId);
   const existing = store.get(k) ?? {};

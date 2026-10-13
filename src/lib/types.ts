@@ -1,17 +1,29 @@
-// Typed mirrors of pult's documented JSON surfaces (schema 1), matching
-// src-tauri/src/types.rs field-for-field. Schema 1 is additive-only, so
-// every field here is exactly what the docs promise — extra fields a future
-// pult adds are simply ignored by JSON.parse, not an error.
+// Typed mirrors of the `data` of pult's JSON documents (schema 2), matching
+// src-tauri/src/types.rs field-for-field. The backend unwraps the envelope
+// and refuses any other schema, so every field here is what the docs
+// promise — extra fields a later pult adds are ignored, not an error.
 
 export interface Param {
   name: string;
-  kind: "pick" | "input";
+  /** A kind this app doesn't know makes its command unrunnable here,
+   *  never guessed at (see RunView). */
+  kind: "pick" | "input" | "flag" | "repeat" | (string & {});
   options?: string[];
   source?: string;
   depends_on?: string[];
   default?: string | null;
   secret?: boolean;
+  /** flag: the word it renders when set; repeat: the option that precedes
+   *  each item, or null for trailing positional items. */
+  arg?: string | null;
+  /** repeat: how many items it takes; `max` null is unbounded. */
+  min?: number;
+  max?: number | null;
 }
+
+/** What one param holds: text for a pick or an input, a boolean for a
+ *  flag, a list for a repeat. */
+export type ParamValue = string | boolean | string[];
 
 export interface IncludeInfo {
   source: string;
@@ -39,7 +51,6 @@ export interface CommandInfo {
 }
 
 export interface Listing {
-  schema: number;
   pult_version: string;
   name: string;
   manifest: string;
@@ -47,6 +58,8 @@ export interface Listing {
   run_dir: string;
   scope: string;
   trusted: boolean;
+  /** The manifest's trust hash; the trust button pins exactly this. */
+  trust_hash: string;
   includes: IncludeInfo[];
   commands: CommandInfo[];
 }
@@ -60,7 +73,6 @@ export interface DoctorEntry {
 }
 
 export interface DoctorReport {
-  schema: number;
   name: string;
   manifest: string;
   commands: DoctorEntry[];
@@ -108,7 +120,11 @@ export type RunEvent =
   | {
       kind: "progress";
       run_id: string;
+      /** The child's own figure, within the current step. */
       pct: number | null;
+      /** pult's whole-run figure: the current step's band of the run.
+       *  Absent from the mock and from a journal that predates it. */
+      run_pct?: number | null;
       text: string | null;
       tail_gen?: number;
     }
@@ -201,7 +217,9 @@ export interface RunRecord {
   lines: OutputLine[];
   step: StepEvent | null;
   stepHistory: StepEvent[];
-  progress: { pct: number | null; text: string | null } | null;
+  /** `pct` is the whole run's progress (what a meter shows), `stepPct`
+   *  the current step's own (what that step's row shows). */
+  progress: { pct: number | null; stepPct: number | null; text: string | null } | null;
   status: string | null;
   stopped: boolean;
   crashed: boolean;

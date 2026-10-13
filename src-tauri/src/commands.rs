@@ -9,7 +9,8 @@ use tauri::{AppHandle, State};
 
 use crate::journal::{self, RunSummary, SpawnOutcomes, TailRegistry};
 use crate::pult_bin::{
-    resolve_pult, run_capture, set_stored_pult_path, stderr_text, stored_pult_path,
+    listing_error, read_document, resolve_pult, run_capture, set_stored_pult_path, stderr_text,
+    stored_pult_path,
 };
 use crate::types::{DoctorReport, Listing};
 
@@ -17,56 +18,30 @@ use crate::types::{DoctorReport, Listing};
 #[tauri::command]
 pub async fn open_repo(app: AppHandle, path: String) -> Result<Listing, String> {
     let bin = resolve_pult(&app)?;
-    let output = run_capture(&bin, &path, &["--list", "--json"], None).await?;
-
-    if output.status.success() {
-        serde_json::from_slice::<Listing>(&output.stdout)
-            .map_err(|e| format!("Couldn't read this repository's commands: {e}"))
-    } else {
-        let stderr = stderr_text(&output);
-        if stderr.contains("no pult.yaml found") {
-            Err("No pult.yaml here — point me at a repository that has one".to_string())
-        } else {
-            Err(format!(
-                "Couldn't read this repository's commands: {stderr}"
-            ))
-        }
-    }
+    crate::pult_bin::list(&bin, &path).await
 }
 
-/// Trust a manifest at its current resolved hash: `pult --trust --list`.
-/// The frontend re-calls `open_repo` afterward to reload with `trusted: true`.
+/// Trust a manifest at the hash the human reviewed (see `pult_bin::trust`).
+/// The frontend re-calls `open_repo` afterward either way: to reload with
+/// `trusted: true`, or to show the new content for review.
 #[tauri::command]
-pub async fn trust_repo(app: AppHandle, path: String) -> Result<(), String> {
+pub async fn trust_repo(app: AppHandle, path: String, hash: String) -> Result<(), String> {
     let bin = resolve_pult(&app)?;
-    let output = run_capture(&bin, &path, &["--trust", "--list"], None).await?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Couldn't trust this repository: {}",
-            stderr_text(&output)
-        ))
-    }
+    crate::pult_bin::trust(&bin, &path, &hash).await
 }
 
 /// Run every command's `check:` and report readiness: `pult doctor --json`.
 /// Trust-gated by pult itself — only call this once `open_repo` reports
-/// `trusted: true`. Note doctor's own process exit code is 1 whenever any
-/// check failed; that's expected and not an error, so we parse stdout first
-/// and only fall back to an error if it isn't valid JSON.
+/// `trusted: true`. Doctor exits 1 whenever any check failed, with a
+/// successful report all the same, so only the document decides.
 #[tauri::command]
 pub async fn doctor(app: AppHandle, path: String) -> Result<DoctorReport, String> {
     let bin = resolve_pult(&app)?;
     let output = run_capture(&bin, &path, &["doctor", "--json"], None).await?;
-
-    if let Ok(report) = serde_json::from_slice::<DoctorReport>(&output.stdout) {
-        return Ok(report);
-    }
-    Err(format!(
-        "Couldn't check readiness: {}",
-        stderr_text(&output)
-    ))
+    read_document(&output, |error| match error.code.as_str() {
+        "trust_changed" => "Trust this repository before checking readiness.".to_string(),
+        _ => format!("Couldn't check readiness: {}", listing_error(error)),
+    })
 }
 
 /// `pult --version`.
@@ -122,7 +97,7 @@ pub async fn run_command(
     path: String,
     id: String,
     run_id: String,
-    values: HashMap<String, String>,
+    values: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     let bin = resolve_pult(&app)?;
     crate::pult_bin::spawn_run(&bin, &path, &id, &values, &run_id, outcomes.inner()).await?;

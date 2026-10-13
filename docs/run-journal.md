@@ -130,7 +130,7 @@ this is "PULT_EVENTS plus stdout/stderr plus exit, as JSON":
 ```jsonc
 { "ts": 1784293512412, "kind": "line",     "stream": "stdout", "text": "building image…" }
 { "ts": 1784293512890, "kind": "step",     "k": 1, "n": 3, "name": "build" }
-{ "ts": 1784293513020, "kind": "progress", "pct": 33, "text": null }        // pct null = indeterminate "?"
+{ "ts": 1784293513020, "kind": "progress", "pct": 33, "run_pct": 44, "text": null }  // pct null = indeterminate "?"
 { "ts": 1784293513400, "kind": "status",   "text": "verifying environment" }
 { "ts": 1784293519001, "kind": "exit",     "code": 0, "stopped": false }
 ```
@@ -138,6 +138,10 @@ this is "PULT_EVENTS plus stdout/stderr plus exit, as JSON":
 - **`ts`** (unix ms, writer's clock) on every record — today the desktop
   stamps step arrival times locally (`StepEvent.at`); the journal carries
   time so history renders stage durations after the fact.
+- **`progress`** carries both figures: `pct` is the child's own, within the
+  current step, and `run_pct` is pult's whole-run figure (the current
+  step's band of the run). The tower shows `run_pct` when present and falls
+  back to `pct`; the stages view shows `pct` against its step.
 - No `run_id` per line — it's implied by the directory. No schema per line
   — `meta.json`'s `schema` covers the pair.
 - `step`/`progress`/`status` payloads follow the PULT_EVENTS v1 grammar

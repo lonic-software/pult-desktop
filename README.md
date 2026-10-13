@@ -21,11 +21,15 @@ sources" below.
 
 ## The sidecar contract
 
-pult-desktop consumes pult **≥ 0.4** via exactly these interfaces (see the
-pult repo's `docs/reference.md` for the authoritative spec):
+pult-desktop consumes pult **≥ 0.5** (JSON schema 2) via exactly these
+interfaces (see the pult repo's `docs/reference.md` for the authoritative
+spec):
 
-- `pult --list --json` — the listing: commands, params, includes, trust state
-- `pult --trust --list` — record trust for the current manifest
+- `pult --list --json` — the listing: commands, params, includes, trust
+  state and the manifest's `trust_hash`
+- `pult --trust=<trust_hash> --list --json` — record trust for exactly the
+  manifest the operator reviewed; pult refuses (`trust_changed`, records
+  nothing) if it changed since
 - `pult doctor --json` — readiness (`check:` results) for every command
 - `pult <id> --params-json` — run a command, values fed on stdin (keeps
   secrets out of argv and shell history)
@@ -33,8 +37,13 @@ pult repo's `docs/reference.md` for the authoritative spec):
 - The `PULT_EVENTS` machine-events channel (unix only) — see "Progress
   events" below
 
-Schema 1 is additive-only; this app deserializes leniently (unknown fields
-are ignored, never rejected) so it keeps working across pult point releases.
+Every `--json` document is an envelope — `{lonic_json, tool, schema, command,
+ok, data | error}` — and the app reads `data` only from a schema-2 document.
+Any other schema, or a bare pre-envelope document, is refused with a message
+naming both schemas, never guessed at. A failure is read by its `error.code`
+(`no_manifest`, `invalid_manifest`, `trust_changed`, …), never by matching
+pult's prose. Within schema 2, unknown fields are ignored, and a param `kind`
+the app doesn't know makes its command unrunnable here rather than guessed.
 
 ### Dynamic pick sources
 
@@ -342,14 +351,18 @@ descriptions than the design mockup's placeholders) allows.
   order), nested into per-source/per-category sub-groups instead when the
   least-nesting rule calls for it (see "Layout" above) — implemented once
   in `src/lib/grouping.ts`
-- Trust modal (manifest path + includes, pinned revs) → `pult --trust --list`
-  → reload; "Not now" leaves the app read-only (forms visible, Run disabled)
+- Trust modal (manifest path, the trust hash, includes, pinned revs) →
+  `pult --trust=<hash> --list --json` → reload; a manifest that changed
+  since the modal opened is refused and the modal reopens on the new content;
+  "Not now" leaves the app read-only (forms visible, Run disabled)
 - Readiness via `pult doctor --json` (trust-gated, matches pult's own gate)
 - Run a command: generated param form (pick/options → select, pick/source →
   select populated by live resolution — see "Dynamic pick sources" above;
   loading/unmet-`depends_on`/resolve-failure states, debounced re-resolve
   when a `depends_on` value changes, input → text, `secret: true` →
-  password), values sent via `--params-json` over stdin, stdout/stderr
+  password, flag → checkbox, repeat → a list of items with add/remove and
+  its `min`/`max` enforced before the run), values sent via `--params-json`
+  over stdin, typed by kind (string, boolean, array of strings), stdout/stderr
   streamed live via Tauri events into a mono output pane, exit code shown at
   the end. Each run gets a client-generated `run_id` threaded through every
   event on the shared `pult://run-output` channel, so more than one command

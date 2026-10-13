@@ -14,6 +14,7 @@
 // pair, not the full `Param` shape.
 
 import { load, type Store } from "@tauri-apps/plugin-store";
+import type { ParamValue } from "../types";
 
 const STORE_FILE = "param-values.json";
 let storePromise: Promise<Store> | null = null;
@@ -41,20 +42,20 @@ function key(repoPath: string, commandId: string): string {
 export async function loadParamValues(
   repoPath: string,
   commandId: string,
-): Promise<Record<string, string>> {
+): Promise<Record<string, ParamValue>> {
   const store = await getStore();
-  return (await store.get<Record<string, string>>(key(repoPath, commandId))) ?? {};
+  return (await store.get<Record<string, ParamValue>>(key(repoPath, commandId))) ?? {};
 }
 
 export async function saveParamValue(
   repoPath: string,
   commandId: string,
   paramName: string,
-  value: string,
+  value: ParamValue,
 ): Promise<void> {
   const store = await getStore();
   const k = key(repoPath, commandId);
-  const existing = (await store.get<Record<string, string>>(k)) ?? {};
+  const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
   await store.set(k, { ...existing, [paramName]: value });
   await store.save();
 }

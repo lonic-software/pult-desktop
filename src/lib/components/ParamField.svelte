@@ -1,18 +1,21 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import type { Param } from "../types";
+  import type { Param, ParamValue } from "../types";
   import { resolvePickSource } from "../api";
+  import { textOf } from "../paramValues";
 
   interface Props {
     param: Param;
-    value: string;
-    onChange: (value: string) => void;
+    /** Typed by kind: text for a pick or an input, a boolean for a flag, a
+     *  list for a repeat (see ../paramValues). */
+    value: ParamValue;
+    onChange: (value: ParamValue) => void;
     /** Repo path + command id — needed to resolve a dynamic `pick.source`. */
     path: string;
     commandId: string;
     /** Every param's current value in this form, so a `depends_on` param
      *  can be read without RunView threading each one through separately. */
-    values: Record<string, string>;
+    values: Record<string, ParamValue>;
     /** Whether the open repo is trusted. A `pick.source` is manifest-authored
      *  shell code, same as a `check:` — resolving it is gated on trust the
      *  same way `pult doctor` is, so we don't even attempt it (and don't show
@@ -27,24 +30,35 @@
     optional?: boolean;
   }
 
-  let { param, value, onChange, path, commandId, values, trusted, optional = false }: Props = $props();
+  let { param, value: typed, onChange, path, commandId, values, trusted, optional = false }: Props = $props();
+
+  // A pick or input's text; every branch below but the flag and repeat ones
+  // reads this.
+  const value = $derived(textOf(typed));
+  const items = $derived(Array.isArray(typed) ? typed : []);
+  const atMax = $derived(param.max != null && items.length >= param.max);
+
+  function setItem(i: number, item: string) {
+    onChange(items.map((old, j) => (j === i ? item : old)));
+  }
 
   // Right-column "kind hint" (design reference's PARAMETERS MODULE row
   // layout) — honest metadata straight off the param model, never a
   // separately-maintained label: a secret input is more useful labeled
   // "secret" than "input" (it's the more specific true fact), otherwise the
-  // hint is just the declared param kind ("pick" or "input").
+  // hint is just the declared param kind ("pick", "input", "flag" or
+  // "repeat").
   const kindHint = $derived(param.secret ? "secret" : param.kind);
 
   const isPickOptions = $derived(param.kind === "pick" && !!param.options);
   const isPickSource = $derived(param.kind === "pick" && !!param.source && !param.options);
   const dependsOn = $derived(param.depends_on ?? []);
-  const missingDeps = $derived(dependsOn.filter((name) => !(values[name] ?? "").trim()));
+  const missingDeps = $derived(dependsOn.filter((name) => !textOf(values[name]).trim()));
   const dependsOnReady = $derived(missingDeps.length === 0);
   // A snapshot of just the depends_on values, so the effect below can tell
   // "still ready" from "ready with a changed value" without re-resolving on
   // every keystroke elsewhere in the form.
-  const dependsOnKey = $derived(JSON.stringify(dependsOn.map((name) => values[name] ?? "")));
+  const dependsOnKey = $derived(JSON.stringify(dependsOn.map((name) => textOf(values[name]))));
 
   let options: string[] = $state([]);
   let loading = $state(false);
@@ -93,7 +107,7 @@
     if (changed && !isFirstResolve && untrack(() => value)) onChange("");
 
     const depValues: Record<string, string> = {};
-    for (const name of dependsOn) depValues[name] = values[name] ?? "";
+    for (const name of dependsOn) depValues[name] = textOf(values[name]);
 
     if (debounceHandle) clearTimeout(debounceHandle);
     loading = true;
@@ -136,7 +150,51 @@
   >
 
   <div class="field-col">
-  {#if isPickOptions}
+  {#if param.kind === "flag"}
+    <label class="switch">
+      <input
+        id="param-{param.name}"
+        type="checkbox"
+        checked={typed === true}
+        onchange={(e) => onChange((e.target as HTMLInputElement).checked)}
+      />
+      <span class="mono">{param.arg}</span>
+    </label>
+  {:else if param.kind === "repeat"}
+    {#each items as item, i (i)}
+      <div class="item">
+        <input
+          id={i === 0 ? `param-${param.name}` : undefined}
+          type={param.secret ? "password" : "text"}
+          value={item}
+          oninput={(e) => setItem(i, (e.target as HTMLInputElement).value)}
+          autocomplete="off"
+          aria-label="{param.name} item {i + 1}"
+        />
+        <button
+          type="button"
+          class="item-button mono"
+          aria-label="remove {param.name} item {i + 1}"
+          onclick={() => onChange(items.filter((_, j) => j !== i))}>−</button
+        >
+      </div>
+    {/each}
+    <button
+      type="button"
+      class="item-button add mono"
+      id={items.length === 0 ? `param-${param.name}` : undefined}
+      disabled={atMax}
+      onclick={() => onChange([...items, ""])}>+ add</button
+    >
+    {#if (param.min ?? 0) > 0 || param.max != null}
+      <p class="helper">
+        {#if param.max == null}at least {param.min}{:else if (param.min ?? 0) === 0}at most {param.max}{:else}{param.min}–{param.max}{/if}
+        item{(param.max ?? param.min) === 1 ? "" : "s"}{#if param.arg} · each as {param.arg}{/if}
+      </p>
+    {:else if param.arg}
+      <p class="helper">each as {param.arg}</p>
+    {/if}
+  {:else if isPickOptions}
     <select id="param-{param.name}" value={value} onchange={(e) => onChange((e.target as HTMLSelectElement).value)}>
       <option value="" disabled selected={value === ""}>Choose…</option>
       {#each param.options ?? [] as opt (opt)}
@@ -267,6 +325,44 @@
 
   input:disabled,
   select:disabled {
+    opacity: 0.55;
+  }
+
+  .switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+    color: var(--crt-muted, #6d8a72);
+    font-size: 11px;
+  }
+
+  .switch input {
+    width: auto;
+    margin: 0;
+    accent-color: var(--crt-ink, #a9c9ab);
+  }
+
+  .item {
+    display: flex;
+    gap: 6px;
+    max-width: 260px;
+  }
+
+  .item-button {
+    padding: 4px 9px;
+    border: 1px solid var(--crt-field-border, #33443a);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--crt-muted, #6d8a72);
+    font-size: 11px;
+  }
+
+  .item-button.add {
+    align-self: flex-start;
+  }
+
+  .item-button:disabled {
     opacity: 0.55;
   }
 
