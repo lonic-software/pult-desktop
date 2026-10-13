@@ -35,6 +35,15 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Read-modify-write updates run one at a time, so a save that overlaps a
+// purge can never write a dropped secret back.
+let writes: Promise<unknown> = Promise.resolve();
+function serialized<T>(op: () => Promise<T>): Promise<T> {
+  const next = writes.then(op, op);
+  writes = next.catch(() => {});
+  return next;
+}
+
 function key(repoPath: string, commandId: string): string {
   return `${repoPath}\0${commandId}`;
 }
@@ -53,11 +62,13 @@ export async function saveParamValue(
   paramName: string,
   value: ParamValue,
 ): Promise<void> {
-  const store = await getStore();
-  const k = key(repoPath, commandId);
-  const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
-  await store.set(k, { ...existing, [paramName]: value });
-  await store.save();
+  return serialized(async () => {
+    const store = await getStore();
+    const k = key(repoPath, commandId);
+    const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
+    await store.set(k, { ...existing, [paramName]: value });
+    await store.save();
+  });
 }
 
 /** Drop remembered values, for a param that became secret after one was
@@ -67,10 +78,12 @@ export async function forgetParamValues(
   commandId: string,
   paramNames: string[],
 ): Promise<void> {
-  const store = await getStore();
-  const k = key(repoPath, commandId);
-  const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
-  const kept = Object.fromEntries(Object.entries(existing).filter(([name]) => !paramNames.includes(name)));
-  await store.set(k, kept);
-  await store.save();
+  return serialized(async () => {
+    const store = await getStore();
+    const k = key(repoPath, commandId);
+    const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
+    const kept = Object.fromEntries(Object.entries(existing).filter(([name]) => !paramNames.includes(name)));
+    await store.set(k, kept);
+    await store.save();
+  });
 }

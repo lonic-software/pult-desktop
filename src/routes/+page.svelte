@@ -918,7 +918,8 @@
       await trustRepo(path, listing.trust_hash);
       if (repoPath === path) {
         await loadRepo(path);
-      } else {
+      } else if (devices.some((d) => d.path === path)) {
+        // Only a device still in the rack: one ejected meanwhile stays gone.
         upsertDevice(path, { status: "ok" });
         persistRack();
       }
@@ -933,7 +934,8 @@
         }
       }
     }
-    trustBusyPath = null;
+    // A later trust on another device owns the flag now.
+    if (trustBusyPath === path) trustBusyPath = null;
   }
 
   function handleNotNow() {
