@@ -30,7 +30,7 @@
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, TOWER_FAILURE_BLINK_COUNT, BLINK_PERIOD_MS } from "../meterLiveness";
   import { deriveStages, stagesVisible } from "../stages";
   import { formatClock, formatDuration, formatRelative } from "../time";
-  import { loadParamValues, saveParamValue } from "../api";
+  import { forgetParamValues, loadParamValues, saveParamValue } from "../api";
   import Tower from "./Tower.svelte";
   import ParamField from "./ParamField.svelte";
   import OutputPane from "./OutputPane.svelte";
@@ -120,6 +120,9 @@
         // their declared defaults, never a hard error blocking the page.
       }
       if (cancelled) return;
+      // A value saved before its param became secret is dropped from disk.
+      const leaked = cmd.params.filter((p) => p.secret && p.name in persisted).map((p) => p.name);
+      if (leaked.length > 0) void forgetParamValues(path, cmd.id, leaked).catch(() => {});
       const next: Record<string, ParamValue> = {};
       for (const p of cmd.params) next[p.name] = restoreValue(p, persisted[p.name]);
       values = next;

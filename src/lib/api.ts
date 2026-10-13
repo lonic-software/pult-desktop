@@ -36,6 +36,7 @@ export const subscribeRunOutput = backend.subscribeRunOutput;
 // promise. Never call `saveParamValue` for a `param.secret` field.
 export const loadParamValues = paramStore.loadParamValues;
 export const saveParamValue = paramStore.saveParamValue;
+export const forgetParamValues = paramStore.forgetParamValues;
 
 // Rack persistence (design 4a — see ./real/rackStore.ts): the mounted-device
 // list and last-active device, restored on launch.

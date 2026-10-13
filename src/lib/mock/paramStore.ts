@@ -31,3 +31,13 @@ export async function saveParamValue(
   const existing = store.get(k) ?? {};
   store.set(k, { ...existing, [paramName]: value });
 }
+
+export async function forgetParamValues(
+  repoPath: string,
+  commandId: string,
+  paramNames: string[],
+): Promise<void> {
+  const k = key(repoPath, commandId);
+  const existing = store.get(k) ?? {};
+  store.set(k, Object.fromEntries(Object.entries(existing).filter(([name]) => !paramNames.includes(name))));
+}

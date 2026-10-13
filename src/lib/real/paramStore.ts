@@ -59,3 +59,18 @@ export async function saveParamValue(
   await store.set(k, { ...existing, [paramName]: value });
   await store.save();
 }
+
+/** Drop remembered values, for a param that became secret after one was
+ *  saved: a secret is never kept on disk. */
+export async function forgetParamValues(
+  repoPath: string,
+  commandId: string,
+  paramNames: string[],
+): Promise<void> {
+  const store = await getStore();
+  const k = key(repoPath, commandId);
+  const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
+  const kept = Object.fromEntries(Object.entries(existing).filter(([name]) => !paramNames.includes(name)));
+  await store.set(k, kept);
+  await store.save();
+}

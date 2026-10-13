@@ -51,7 +51,8 @@
   let view: "board" | "run" = $state("board");
   let showTrustModal = $state(false);
   let trustNotice: string | null = $state(null);
-  let trustBusy = $state(false);
+  /** The repo whose trust grant is in flight, if any. */
+  let trustBusyPath: string | null = $state(null);
   let showSettings = $state(false);
   let pultPathSetting: string | null = $state(null);
   let versionInfo: string | null = $state(null);
@@ -568,11 +569,14 @@
         case "step":
           patchRun((current) => {
             const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
-            // A new step starts with no figure of its own, and the run moves
-            // to the start of that step's band, as pult's own bar does.
-            const banded = event.k >= 1 && event.k <= event.n;
+            // A new step starts with no figure of its own. Once the run has
+            // reported progress, the meter moves to the start of the step's
+            // band, which is pult's own `run_pct` with pct 0. Before that it
+            // stays indeterminate: steps alone say nothing about how far.
+            const before = current.progress?.pct ?? null;
+            const banded = before != null && event.k >= 1 && event.k <= event.n;
             const progress = {
-              pct: banded ? Math.round(((event.k - 1) * 100) / event.n) : (current.progress?.pct ?? null),
+              pct: banded ? Math.floor(((event.k - 1) * 100) / event.n) : before,
               stepPct: null,
               text: null,
             };
@@ -909,10 +913,15 @@
   async function handleTrust() {
     if (!repoPath || !listing) return;
     const path = repoPath;
-    trustBusy = true;
+    trustBusyPath = path;
     try {
       await trustRepo(path, listing.trust_hash);
-      if (repoPath === path) await loadRepo(path);
+      if (repoPath === path) {
+        await loadRepo(path);
+      } else {
+        upsertDevice(path, { status: "ok" });
+        persistRack();
+      }
     } catch (e) {
       // The operator may have moved to another device meanwhile: the
       // refusal is about this one, so it never pulls them back.
@@ -920,11 +929,11 @@
         await loadRepo(path);
         if (repoPath === path) {
           if (showTrustModal) trustNotice = String(e);
-          else if (!listing) listingError = `${e}\n${listingError ?? ""}`.trim();
+          else if (!listing) listingError = `${listingError ?? ""} (Trusting it was refused too: ${e})`.trim();
         }
       }
     }
-    trustBusy = false;
+    trustBusyPath = null;
   }
 
   function handleNotNow() {
@@ -1259,7 +1268,7 @@
   {#if showTrustModal && listing}
     <TrustModal
       {listing}
-      busy={trustBusy}
+      busy={trustBusyPath === repoPath}
       notice={trustNotice}
       onTrust={handleTrust}
       onNotNow={handleNotNow}
