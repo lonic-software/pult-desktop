@@ -100,7 +100,7 @@ export function deriveStages(command: CommandInfo, run: RunRecord | null): Stage
         meta = elapsedMeta(entry, nextEntry, null);
       } else if (k === currentK) {
         kind = "active";
-        meta = run?.progress?.pct != null ? `${run.progress.pct}%` : "…";
+        meta = run?.progress?.stepPct != null ? `${run.progress.stepPct}%` : "…";
       } else {
         kind = "pending";
         meta = "queued";

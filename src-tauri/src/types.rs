@@ -1,22 +1,31 @@
-//! Typed mirrors of pult's documented JSON surfaces (schema 1).
+//! Typed mirrors of pult's documented JSON surfaces (schema 2).
 //!
-//! These structs deserialize `pult --list --json` and `pult doctor --json`.
-//! Per the reference (docs/reference.md in the pult repo), schema 1 changes
-//! are additive-only, so unknown fields are ignored (serde's default
-//! behavior) rather than rejected — we never use `deny_unknown_fields`.
+//! Every `--json` output is one document in the Lonic envelope, its payload
+//! under `data` on success or an `error` on failure; [`parse_document`]
+//! unwraps it. The structs below deserialize `data` for `pult --list --json`
+//! and `pult doctor --json`. Per the reference (docs/reference.md in the pult
+//! repo), changes within a schema are additive-only, so unknown fields are
+//! ignored (serde's default behavior) rather than rejected — we never use
+//! `deny_unknown_fields`. A different schema is refused outright.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// The envelope schema this app reads.
+pub const SCHEMA: u32 = 2;
 
 /// One `<param>` entry from a command's `params` array.
 ///
-/// A param is exactly one of `pick` (with `options` or `source`) or `input`;
-/// rather than model that as an enum keyed on `kind`, we keep every field
-/// optional and let callers branch on `kind` + field presence. This is more
-/// forgiving of additive schema changes than a strict tagged enum.
+/// A param's `kind` is open: `pick` (with `options` or `source`), `input`,
+/// `flag` and `repeat` today, and a later pult may add more within schema 2.
+/// Rather than model that as an enum keyed on `kind`, we keep every field
+/// optional and let callers branch on `kind` + field presence; a kind the
+/// frontend doesn't know makes its command unrunnable here, nothing more.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Param {
     pub name: String,
-    /// `"pick"` or `"input"`.
+    /// `"pick"`, `"input"`, `"flag"` or `"repeat"` — or a kind this app
+    /// doesn't know yet.
     pub kind: String,
     /// `pick` with a static list.
     #[serde(default)]
@@ -30,9 +39,21 @@ pub struct Param {
     /// `input` default value, if any.
     #[serde(default)]
     pub default: Option<String>,
-    /// `input.secret` — render as a password field, never log or persist.
+    /// `input.secret` / `repeat.secret` — render as a password field, never
+    /// log or persist.
     #[serde(default)]
     pub secret: Option<bool>,
+    /// `flag`: the word the tool receives when set. `repeat`: the word before
+    /// each item, or `null` for a positional list. Informational only — pult
+    /// renders it; values are passed by `name`.
+    #[serde(default)]
+    pub arg: Option<String>,
+    /// `repeat`: the fewest items accepted.
+    #[serde(default)]
+    pub min: Option<u32>,
+    /// `repeat`: the most items accepted; `null` = unbounded.
+    #[serde(default)]
+    pub max: Option<u32>,
 }
 
 /// One entry in `includes[]`.
@@ -81,10 +102,9 @@ pub struct CommandInfo {
     pub steps: Option<Vec<String>>,
 }
 
-/// `pult --list --json` — the stable listing surface.
+/// `pult --list --json`'s `data` — the stable listing surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Listing {
-    pub schema: u32,
     pub pult_version: String,
     pub name: String,
     pub manifest: String,
@@ -93,6 +113,10 @@ pub struct Listing {
     pub scope: String,
     /// Whether this manifest is trusted at its current resolved hash.
     pub trusted: bool,
+    /// The manifest's current trust hash — what the trust button grants, as
+    /// `--trust=<hash>`, so a manifest that changes after the human reviewed
+    /// it is refused rather than trusted.
+    pub trust_hash: String,
     pub includes: Vec<IncludeInfo>,
     pub commands: Vec<CommandInfo>,
 }
@@ -108,13 +132,82 @@ pub struct DoctorEntry {
     pub exit_code: Option<i32>,
 }
 
-/// `pult doctor --json` — the stable readiness surface.
+/// `pult doctor --json`'s `data` — the stable readiness surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
-    pub schema: u32,
     pub name: String,
     pub manifest: String,
     pub commands: Vec<DoctorEntry>,
+}
+
+/// The `error` of a failure document. Classify by `code`, never by the
+/// exit status or the prose; an unknown code is treated as `generic`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PultError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub details: Option<serde_json::Value>,
+}
+
+impl PultError {
+    /// `details.what_changed` of a `trust_changed` refusal.
+    pub fn what_changed(&self) -> Option<&str> {
+        self.details.as_ref()?.get("what_changed")?.as_str()
+    }
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    lonic_json: u32,
+    tool: String,
+    schema: u32,
+    ok: bool,
+    #[serde(default)]
+    data: Option<serde_json::Value>,
+    #[serde(default)]
+    error: Option<PultError>,
+}
+
+/// Unwrap one `--json` document from pult's stdout: `Ok(Ok(data))` for a
+/// success, `Ok(Err(error))` for a failure pult reported, and `Err` when the
+/// output isn't a document this app can read — not JSON, not pult's, or
+/// another schema. That last case is never guessed through: a pult too old
+/// or too new for this app says so.
+pub fn parse_document<T: DeserializeOwned>(stdout: &[u8]) -> Result<Result<T, PultError>, String> {
+    let raw: serde_json::Value = serde_json::from_slice(stdout)
+        .map_err(|e| format!("pult didn't answer with a JSON document ({e})"))?;
+    // pult before schema 2 wrote its success documents bare, with only a
+    // `schema` field: the same refusal as any other schema.
+    let schema = raw.get("schema").and_then(|v| v.as_u64());
+    if raw.get("lonic_json").is_none() && schema.is_some_and(|s| s != u64::from(SCHEMA)) {
+        return Err(schema_mismatch(schema.unwrap_or_default()));
+    }
+    let doc: Envelope = serde_json::from_value(raw)
+        .map_err(|e| format!("pult answered with a document this app can't read ({e})"))?;
+    if doc.lonic_json != 1 || doc.tool != "pult" {
+        return Err(format!(
+            "pult answered with a document this app can't read (lonic_json {}, tool {:?})",
+            doc.lonic_json, doc.tool
+        ));
+    }
+    if doc.schema != SCHEMA {
+        return Err(schema_mismatch(u64::from(doc.schema)));
+    }
+    match (doc.ok, doc.data, doc.error) {
+        (true, Some(data), _) => serde_json::from_value(data)
+            .map(Ok)
+            .map_err(|e| format!("pult's document is missing something this app needs ({e})")),
+        (false, _, Some(error)) => Ok(Err(error)),
+        _ => Err("pult's document has neither data nor an error".to_string()),
+    }
+}
+
+fn schema_mismatch(schema: u64) -> String {
+    format!(
+        "This pult speaks JSON schema {schema}, and pult-desktop needs schema {SCHEMA}. \
+         Install a pult that matches this app, or set its path in Settings."
+    )
 }
 
 /// A line of output streamed while a command runs, the machine events pult
@@ -169,10 +262,13 @@ pub enum RunEvent {
     },
     /// `progress <0-100|?> [text]` from the `PULT_EVENTS` channel —
     /// `pct: None` is the indeterminate `?` form. Unix only, same caveat as
-    /// `Step`.
+    /// `Step`. `pct` is the child's own figure, within the current step;
+    /// `run_pct` is pult's whole-run figure, the step's band of the run
+    /// (`None` when `pct` is, or from a journal that predates it).
     Progress {
         run_id: String,
         pct: Option<u8>,
+        run_pct: Option<u8>,
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tail_gen: Option<u64>,
@@ -240,10 +336,15 @@ impl RunEvent {
                 tail_gen: Some(gen),
             },
             RunEvent::Progress {
-                run_id, pct, text, ..
+                run_id,
+                pct,
+                run_pct,
+                text,
+                ..
             } => RunEvent::Progress {
                 run_id,
                 pct,
+                run_pct,
                 text,
                 tail_gen: Some(gen),
             },
@@ -266,5 +367,61 @@ impl RunEvent {
                 tail_gen: Some(gen),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(doc: &str) -> Result<Result<serde_json::Value, PultError>, String> {
+        parse_document(doc.as_bytes())
+    }
+
+    #[test]
+    fn a_schema_2_document_yields_its_data_or_its_error() {
+        let ok = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":2,"command":"list","ok":true,"data":{"a":1}}"#,
+        );
+        assert_eq!(ok.unwrap().unwrap(), serde_json::json!({"a": 1}));
+
+        let refused = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":2,"command":"list","ok":false,
+                "error":{"code":"trust_changed","message":"m",
+                         "details":{"what_changed":"unexpected"}}}"#,
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(refused.code, "trust_changed");
+        assert_eq!(refused.what_changed(), Some("unexpected"));
+    }
+
+    /// pult 0.4: bare success documents and schema-1 error envelopes.
+    #[test]
+    fn another_schema_is_refused_by_name_never_read() {
+        let bare = parse(r#"{"schema":1,"name":"x","manifest":"m","commands":[]}"#).unwrap_err();
+        assert!(bare.contains("schema 1"), "{bare}");
+
+        let old_error = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":1,"command":"list","ok":false,
+                "error":{"code":"no_manifest","message":"m"}}"#,
+        )
+        .unwrap_err();
+        assert!(old_error.contains("schema 1"), "{old_error}");
+
+        let newer = parse(
+            r#"{"lonic_json":1,"tool":"pult","schema":3,"command":"list","ok":true,"data":{}}"#,
+        )
+        .unwrap_err();
+        assert!(newer.contains("schema 3"), "{newer}");
+    }
+
+    #[test]
+    fn output_that_is_not_pults_document_is_refused() {
+        assert!(parse("not json").is_err());
+        assert!(parse(
+            r#"{"lonic_json":1,"tool":"forklift","schema":2,"command":null,"ok":true,"data":{}}"#
+        )
+        .is_err());
     }
 }

@@ -22,6 +22,7 @@
     DoctorReport,
     Listing,
     OutputLine,
+    ParamValue,
     RackDevice,
     RunEvent,
     RunRecord,
@@ -49,7 +50,9 @@
   let selectedId: string | null = $state(null);
   let view: "board" | "run" = $state("board");
   let showTrustModal = $state(false);
-  let trustBusy = $state(false);
+  let trustNotice: string | null = $state(null);
+  /** The repo whose trust grant is in flight, if any. */
+  let trustBusyPath: string | null = $state(null);
   let showSettings = $state(false);
   let pultPathSetting: string | null = $state(null);
   let versionInfo: string | null = $state(null);
@@ -141,7 +144,7 @@
   // active device's slice, which is what the board/run view render.
   let runsByRepo: Record<string, Record<string, RunRecord>> = $state({});
   let overridesByRepo: Record<string, Record<string, BoardMeterOverride | null>> = $state({});
-  let paramValuesByRepo: Record<string, Record<string, Record<string, string>>> = $state({});
+  let paramValuesByRepo: Record<string, Record<string, Record<string, ParamValue>>> = $state({});
 
   const runs: Record<string, RunRecord> = $derived(
     repoPath ? (runsByRepo[repoPath] ?? {}) : {},
@@ -153,7 +156,7 @@
   // disk persistence (loadParamValues) on open and writes non-secret edits
   // back (saveParamValue), which is what the parameters module's
   // "remembered per repo" footer note promises — see RunView.
-  const paramValues: Record<string, Record<string, string>> = $derived(
+  const paramValues: Record<string, Record<string, ParamValue>> = $derived(
     repoPath ? (paramValuesByRepo[repoPath] ?? {}) : {},
   );
 
@@ -566,11 +569,24 @@
         case "step":
           patchRun((current) => {
             const step = { k: event.k, n: event.n, name: event.name, at: Date.now() };
-            return { ...current, step, stepHistory: [...current.stepHistory, step] };
+            // A new step starts with no figure of its own. Once the run has
+            // reported progress, the meter moves to the start of the step's
+            // band, which is pult's own `run_pct` with pct 0. Before that it
+            // stays indeterminate: steps alone say nothing about how far.
+            const before = current.progress?.pct ?? null;
+            const banded = before != null && event.k >= 1 && event.k <= event.n;
+            const progress = {
+              pct: banded ? Math.floor(((event.k - 1) * 100) / event.n) : before,
+              stepPct: null,
+              text: null,
+            };
+            return { ...current, step, progress, stepHistory: [...current.stepHistory, step] };
           });
           break;
         case "progress":
-          updateRecord({ progress: { pct: event.pct, text: event.text } });
+          updateRecord({
+            progress: { pct: event.run_pct ?? event.pct, stepPct: event.pct, text: event.text },
+          });
           break;
         case "status":
           updateRecord({ status: event.text });
@@ -790,6 +806,7 @@
     stopActivePoll();
     repoPath = path;
     listingError = null;
+    trustNotice = null;
     listing = null;
     doctorReport = null;
     selectedId = null;
@@ -890,22 +907,40 @@
     localStorage.setItem("pult-desktop:rack-collapsed", rackCollapsed ? "1" : "0");
   }
 
+  // Pins the hash the modal showed. A refusal (the manifest changed since)
+  // reloads the listing, which reopens the modal on the new content with
+  // the reason above it.
   async function handleTrust() {
-    if (!repoPath) return;
-    trustBusy = true;
+    if (!repoPath || !listing) return;
+    const path = repoPath;
+    trustBusyPath = path;
     try {
-      await trustRepo(repoPath);
-      showTrustModal = false;
-      await loadRepo(repoPath);
+      await trustRepo(path, listing.trust_hash);
+      if (repoPath === path) {
+        await loadRepo(path);
+      } else if (devices.some((d) => d.path === path)) {
+        // Only a device still in the rack: one ejected meanwhile stays gone.
+        upsertDevice(path, { status: "ok" });
+        persistRack();
+      }
     } catch (e) {
-      listingError = String(e);
-      showTrustModal = false;
+      // The operator may have moved to another device meanwhile: the
+      // refusal is about this one, so it never pulls them back.
+      if (repoPath === path) {
+        await loadRepo(path);
+        if (repoPath === path) {
+          if (showTrustModal) trustNotice = String(e);
+          else if (!listing) listingError = `${listingError ?? ""} (Trusting it was refused too: ${e})`.trim();
+        }
+      }
     }
-    trustBusy = false;
+    // A later trust on another device owns the flag now.
+    if (trustBusyPath === path) trustBusyPath = null;
   }
 
   function handleNotNow() {
     showTrustModal = false;
+    trustNotice = null;
     if (repoPath) readOnlyPaths.add(repoPath);
   }
 
@@ -919,7 +954,7 @@
     view = "board";
   }
 
-  async function handleRun(commandId: string, values: Record<string, string>) {
+  async function handleRun(commandId: string, values: Record<string, ParamValue>) {
     if (!repoPath) return;
     // Captured once: every closure below writes through `runsByRepo[path]`
     // rather than the active-device `runs` slice, so this run keeps
@@ -1034,7 +1069,7 @@
     });
   }
 
-  function handleValuesChange(commandId: string, values: Record<string, string>) {
+  function handleValuesChange(commandId: string, values: Record<string, ParamValue>) {
     if (!repoPath) return;
     const forRepo = paramValuesByRepo[repoPath] ?? {};
     paramValuesByRepo = { ...paramValuesByRepo, [repoPath]: { ...forRepo, [commandId]: values } };
@@ -1233,7 +1268,13 @@
   </div>
 
   {#if showTrustModal && listing}
-    <TrustModal {listing} busy={trustBusy} onTrust={handleTrust} onNotNow={handleNotNow} />
+    <TrustModal
+      {listing}
+      busy={trustBusyPath === repoPath}
+      notice={trustNotice}
+      onTrust={handleTrust}
+      onNotNow={handleNotNow}
+    />
   {/if}
 
   {#if showSettings}

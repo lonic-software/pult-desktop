@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use pult_desktop_lib::pult_bin::{resolve_pick_source, run_capture};
-use pult_desktop_lib::types::{DoctorReport, Listing};
+use pult_desktop_lib::pult_bin::{list, resolve_pick_source, run_capture, trust};
+use pult_desktop_lib::types::{parse_document, DoctorReport, Listing};
 
 fn fixture_repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repo")
@@ -98,8 +98,10 @@ async fn listing_parses_and_starts_untrusted() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let listing: Listing = serde_json::from_slice(&output.stdout).expect("valid Listing json");
-    assert_eq!(listing.schema, 1);
+    let listing: Listing = parse_document(&output.stdout)
+        .expect("a schema-2 document")
+        .expect("a successful listing");
+    assert_eq!(listing.trust_hash.len(), 64, "trust_hash is the manifest's sha256");
     assert!(!listing.trusted, "fresh trust store should be untrusted");
     assert_eq!(listing.name, "demo-repo");
 
@@ -170,10 +172,10 @@ async fn trust_then_doctor_reports_readiness() {
     // doctor's own exit code is 1 whenever any check failed — that's expected
     // here (the fixture's `import` command has a deliberately-broken check),
     // so we assert on the parsed JSON, not the exit code.
-    let report: DoctorReport =
-        serde_json::from_slice(&doctor_out.stdout).expect("valid DoctorReport json");
+    let report: DoctorReport = parse_document(&doctor_out.stdout)
+        .expect("a schema-2 document")
+        .expect("a successful report");
 
-    assert_eq!(report.schema, 1);
     let by_id = |id: &str| report.commands.iter().find(|c| c.id == id).unwrap();
 
     assert_eq!(by_id("shell").ready, Some(true));
@@ -230,11 +232,14 @@ async fn run_keeps_secret_values_out_of_the_running_banner() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // The composed command actually receives the real value…
+    // The composed command receives the real value — pult's output masker
+    // only replaces an exact copy of the secret — and the forwarded output
+    // shows it masked…
     assert!(
-        stdout.contains("importing with token hunter2 note hi"),
+        stdout.contains("importing with token <redacted> note hi"),
         "stdout was: {stdout}"
     );
+    assert!(!stdout.contains("hunter2"), "secret leaked into the output: {stdout}");
     // …but pult's own "running:" banner (stderr) redacts it.
     assert!(
         !stderr.contains("hunter2"),
@@ -290,8 +295,19 @@ async fn resolve_pick_source_end_to_end() {
         "refusal should mention trust"
     );
 
-    // Trust the manifest, same as the app's trust flow.
-    run_in_fixture(&bin, trust_store.path(), &["--trust", "--list"], None).await;
+    // The app's trust flow pins the hash the human reviewed: one that no
+    // longer matches is refused and records nothing…
+    let stale = trust(&bin, &repo, &"0".repeat(64)).await.unwrap_err();
+    assert!(
+        stale.contains("changed after you reviewed it"),
+        "a stale hash should be refused as a change: {stale}"
+    );
+    assert!(!list(&bin, &repo).await.unwrap().trusted);
+
+    // …and the current one is recorded.
+    let hash = list(&bin, &repo).await.unwrap().trust_hash;
+    trust(&bin, &repo, &hash).await.expect("trusting the reviewed hash");
+    assert!(list(&bin, &repo).await.unwrap().trusted);
 
     // Success + depends_on interpolation: the fixture's `target` param
     // sources `echo target-{region}-a; echo target-{region}-b`, so the

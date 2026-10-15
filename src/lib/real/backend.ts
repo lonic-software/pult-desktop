@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { DoctorReport, Listing, RunEvent, RunSummary } from "../types";
+import type { DoctorReport, Listing, ParamValue, RunEvent, RunSummary } from "../types";
 
 export async function pickFolder(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false, title: "Mount a repository" });
@@ -16,8 +16,8 @@ export async function openRepo(path: string): Promise<Listing> {
   return invoke<Listing>("open_repo", { path });
 }
 
-export async function trustRepo(path: string): Promise<void> {
-  await invoke<void>("trust_repo", { path });
+export async function trustRepo(path: string, hash: string): Promise<void> {
+  await invoke<void>("trust_repo", { path, hash });
 }
 
 export async function doctorCheck(path: string): Promise<DoctorReport> {
@@ -56,7 +56,7 @@ export async function resolvePickSource(
 export async function runCommand(
   path: string,
   id: string,
-  values: Record<string, string>,
+  values: Record<string, ParamValue>,
   runId: string,
 ): Promise<void> {
   await invoke<void>("run_command", { path, id, runId, values });

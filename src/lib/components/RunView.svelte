@@ -16,7 +16,8 @@
      toolbar, panel chrome) is the unchanged 1b faceplate language. -->
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { CommandInfo, DoctorReport, Param, RunRecord } from "../types";
+  import type { CommandInfo, DoctorReport, Param, ParamValue, RunRecord } from "../types";
+  import { initialValue, isOptional, restoreValue, runBlocker, runValues, textOf } from "../paramValues";
   import { readinessFor } from "../readiness";
   import {
     towerStateFor,
@@ -29,7 +30,7 @@
   import { SUCCESS_BLINK_COUNT, STOPPED_BLINK_COUNT, TOWER_FAILURE_BLINK_COUNT, BLINK_PERIOD_MS } from "../meterLiveness";
   import { deriveStages, stagesVisible } from "../stages";
   import { formatClock, formatDuration, formatRelative } from "../time";
-  import { loadParamValues, saveParamValue } from "../api";
+  import { forgetParamValues, loadParamValues, saveParamValue } from "../api";
   import Tower from "./Tower.svelte";
   import ParamField from "./ParamField.svelte";
   import OutputPane from "./OutputPane.svelte";
@@ -43,10 +44,10 @@
     /** Values this session already resolved for this command (see
      *  +page.svelte's `paramValues` lift) — when present, skips the
      *  per-repo store read entirely (see the values-loading effect below). */
-    initialValues: Record<string, string> | null;
-    onRun: (values: Record<string, string>) => void;
+    initialValues: Record<string, ParamValue> | null;
+    onRun: (values: Record<string, ParamValue>) => void;
     onStop: () => void;
-    onValuesChange: (values: Record<string, string>) => void;
+    onValuesChange: (values: Record<string, ParamValue>) => void;
     /** Same handler +page.svelte wires to the toolbar's "← Board" button
      *  (see Toolbar.svelte's `onBack`) — this component no longer renders
      *  its own back control, but still needs the callback for the Esc
@@ -88,7 +89,7 @@
   // same as any other field but NEVER handed to `saveParamValue` — see
   // `handleChange` below.
   // ---------------------------------------------------------------------
-  let values: Record<string, string> = $state({});
+  let values: Record<string, ParamValue> = $state({});
   const saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   $effect(() => {
@@ -105,13 +106,13 @@
     // First time this session for this command: seed synchronously from
     // declared defaults so fields never flash empty, then upgrade
     // asynchronously from the per-repo store once it resolves.
-    const seeded: Record<string, string> = {};
-    for (const p of cmd.params) seeded[p.name] = p.default ?? "";
+    const seeded: Record<string, ParamValue> = {};
+    for (const p of cmd.params) seeded[p.name] = initialValue(p);
     values = seeded;
 
     let cancelled = false;
     void (async () => {
-      let persisted: Record<string, string> = {};
+      let persisted: Record<string, ParamValue> = {};
       try {
         persisted = await loadParamValues(path, cmd.id);
       } catch {
@@ -119,8 +120,11 @@
         // their declared defaults, never a hard error blocking the page.
       }
       if (cancelled) return;
-      const next: Record<string, string> = {};
-      for (const p of cmd.params) next[p.name] = persisted[p.name] ?? p.default ?? "";
+      // A value saved before its param became secret is dropped from disk.
+      const leaked = cmd.params.filter((p) => p.secret && p.name in persisted).map((p) => p.name);
+      if (leaked.length > 0) void forgetParamValues(path, cmd.id, leaked).catch(() => {});
+      const next: Record<string, ParamValue> = {};
+      for (const p of cmd.params) next[p.name] = restoreValue(p, persisted[p.name]);
       values = next;
       onValuesChange(next);
     })();
@@ -129,7 +133,7 @@
     };
   });
 
-  function handleChange(param: Param, value: string) {
+  function handleChange(param: Param, value: ParamValue) {
     values = { ...values, [param.name]: value };
     onValuesChange(values);
     if (param.secret) return; // never persisted — see the Props doc comment
@@ -149,8 +153,9 @@
 
   // ---------------------------------------------------------------------
   // Params module folding (large param counts) — see docs/design-language.md
-  // and the layout addendum: a param with a declared default is treated as
-  // optional ("default present ≈ optional"); required (no-default) params
+  // and the layout addendum: a param the run can go without is optional (a
+  // flag, a repeat with `min: 0`, a pick or input with a declared default —
+  // see `isOptional`); required params
   // always render, optional ones collapse behind a fold once the command
   // has enough params that showing all of them at once would be unwieldy.
   // Session-scoped per command (resets whenever `command` changes — which
@@ -162,8 +167,8 @@
   // "normal" command has 2) should never trigger it, and even a fairly
   // busy 6-param command still renders unfolded.
 
-  const requiredParams = $derived(command.params.filter((p) => p.default == null));
-  const optionalParams = $derived(command.params.filter((p) => p.default != null));
+  const requiredParams = $derived(command.params.filter((p) => !isOptional(p)));
+  const optionalParams = $derived(command.params.filter((p) => isOptional(p)));
   const shouldFold = $derived(command.params.length > FOLD_THRESHOLD && optionalParams.length > 0);
   let foldExpanded = $state(false);
   $effect(() => {
@@ -211,11 +216,14 @@
     // operation — a folded param never actually blocks a run. Kept anyway
     // so a folded field that somehow ended up blank surfaces itself instead
     // of silently sending an empty value.
-    if (shouldFold && !foldExpanded && optionalParams.some((p) => !values[p.name]?.trim())) {
+    // A folded flag or repeat is never blank: off and empty are values.
+    const blank = (p: Param) =>
+      (p.kind === "pick" || p.kind === "input") && !textOf(values[p.name]).trim();
+    if (shouldFold && !foldExpanded && optionalParams.some(blank)) {
       foldExpanded = true;
       return;
     }
-    onRun(values);
+    onRun(runValues(command.params, values));
   }
 
   // ---------------------------------------------------------------------
@@ -225,7 +233,7 @@
   const disabledReason = $derived.by(() => {
     if (command.interactive) return `Needs a real terminal — run \`pult ${command.id}\` in one.`;
     if (!trusted) return "Trust this repository to run commands.";
-    return null;
+    return runBlocker(command.params, values);
   });
 
   // ---------------------------------------------------------------------
@@ -479,7 +487,7 @@
                 {path}
                 {trusted}
                 commandId={command.id}
-                value={values[param.name] ?? ""}
+                value={values[param.name] ?? initialValue(param)}
                 {values}
                 onChange={(v) => handleChange(param, v)}
               />
@@ -490,7 +498,7 @@
                 {path}
                 {trusted}
                 commandId={command.id}
-                value={values[param.name] ?? ""}
+                value={values[param.name] ?? initialValue(param)}
                 {values}
                 optional
                 onChange={(v) => handleChange(param, v)}

@@ -6,9 +6,11 @@
     busy: boolean;
     onTrust: () => void;
     onNotNow: () => void;
+    /** Why the last trust attempt was refused, shown above the review. */
+    notice?: string | null;
   }
 
-  let { listing, busy, onTrust, onNotNow }: Props = $props();
+  let { listing, busy, onTrust, onNotNow, notice = null }: Props = $props();
 </script>
 
 <div class="scrim">
@@ -19,9 +21,18 @@
       come from before continuing.
     </p>
 
+    {#if notice}
+      <p class="notice" role="alert">{notice}</p>
+    {/if}
+
     <div class="field">
       <span class="field-label">Manifest</span>
       <code class="mono">{listing.manifest}</code>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Trusting exactly</span>
+      <code class="mono hash">{listing.trust_hash}</code>
     </div>
 
     {#if listing.includes.length > 0}
@@ -55,6 +66,15 @@
 </div>
 
 <style>
+  .notice {
+    margin: 0 0 var(--space-4);
+    color: var(--lamp-red);
+  }
+
+  .hash {
+    overflow-wrap: anywhere;
+  }
+
   .scrim {
     position: fixed;
     inset: 0;

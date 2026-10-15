@@ -1,7 +1,7 @@
 // The VITE_MOCK=1 stand-in for the real Tauri backend. Mirrors src/lib/api.ts's
 // shape exactly so App.svelte never has to know which one it's talking to.
 
-import type { DoctorReport, Listing, RunEvent, RunSummary } from "../types";
+import type { DoctorReport, Listing, ParamValue, RunEvent, RunSummary } from "../types";
 import { mockDoctorReport, mockListingTrusted, mockListingUntrusted } from "./fixtures";
 
 const FIXTURE_PATH = "/Users/operator/acme-ops";
@@ -25,7 +25,7 @@ export async function openRepo(path: string): Promise<Listing> {
   return trusted ? mockListingTrusted : mockListingUntrusted;
 }
 
-export async function trustRepo(_path: string): Promise<void> {
+export async function trustRepo(_path: string, _hash: string): Promise<void> {
   await delay(200);
   trusted = true;
 }
@@ -36,7 +36,7 @@ export async function doctorCheck(_path: string): Promise<DoctorReport> {
 }
 
 export async function pultVersion(): Promise<string> {
-  return "pult 0.4.0";
+  return "pult 0.5.0";
 }
 
 export async function getPultPath(): Promise<string | null> {
@@ -247,7 +247,7 @@ async function driveScript(
 export async function runCommand(
   _path: string,
   id: string,
-  _values: Record<string, string>,
+  _values: Record<string, ParamValue>,
   runId: string,
 ): Promise<void> {
   const script = MOCK_SCRIPTS[id] ?? DEFAULT_SCRIPT;

@@ -14,6 +14,7 @@
 // pair, not the full `Param` shape.
 
 import { load, type Store } from "@tauri-apps/plugin-store";
+import type { ParamValue } from "../types";
 
 const STORE_FILE = "param-values.json";
 let storePromise: Promise<Store> | null = null;
@@ -34,6 +35,15 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
+// Read-modify-write updates run one at a time, so a save that overlaps a
+// purge can never write a dropped secret back.
+let writes: Promise<unknown> = Promise.resolve();
+function serialized<T>(op: () => Promise<T>): Promise<T> {
+  const next = writes.then(op, op);
+  writes = next.catch(() => {});
+  return next;
+}
+
 function key(repoPath: string, commandId: string): string {
   return `${repoPath}\0${commandId}`;
 }
@@ -41,20 +51,39 @@ function key(repoPath: string, commandId: string): string {
 export async function loadParamValues(
   repoPath: string,
   commandId: string,
-): Promise<Record<string, string>> {
+): Promise<Record<string, ParamValue>> {
   const store = await getStore();
-  return (await store.get<Record<string, string>>(key(repoPath, commandId))) ?? {};
+  return (await store.get<Record<string, ParamValue>>(key(repoPath, commandId))) ?? {};
 }
 
 export async function saveParamValue(
   repoPath: string,
   commandId: string,
   paramName: string,
-  value: string,
+  value: ParamValue,
 ): Promise<void> {
-  const store = await getStore();
-  const k = key(repoPath, commandId);
-  const existing = (await store.get<Record<string, string>>(k)) ?? {};
-  await store.set(k, { ...existing, [paramName]: value });
-  await store.save();
+  return serialized(async () => {
+    const store = await getStore();
+    const k = key(repoPath, commandId);
+    const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
+    await store.set(k, { ...existing, [paramName]: value });
+    await store.save();
+  });
+}
+
+/** Drop remembered values, for a param that became secret after one was
+ *  saved: a secret is never kept on disk. */
+export async function forgetParamValues(
+  repoPath: string,
+  commandId: string,
+  paramNames: string[],
+): Promise<void> {
+  return serialized(async () => {
+    const store = await getStore();
+    const k = key(repoPath, commandId);
+    const existing = (await store.get<Record<string, ParamValue>>(k)) ?? {};
+    const kept = Object.fromEntries(Object.entries(existing).filter(([name]) => !paramNames.includes(name)));
+    await store.set(k, kept);
+    await store.save();
+  });
 }

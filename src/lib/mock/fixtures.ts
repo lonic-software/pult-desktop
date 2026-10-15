@@ -25,14 +25,14 @@ const AWS_ORIGIN = "github.com/opskit/aws-common@v1.4.2";
 const TEST_ORIGIN = "github.com/opskit/test-harness@v0.9.0";
 
 export const mockListingUntrusted: Listing = {
-  schema: 1,
-  pult_version: "0.4.0",
+  pult_version: "0.5.0",
   name: "acme-ops",
   manifest: "/Users/operator/acme-ops/pult.yaml",
   dir: "/Users/operator/acme-ops",
   run_dir: "/Users/operator/acme-ops",
   scope: "repo",
   trusted: false,
+  trust_hash: "4f1c9e0b7a2d6c35e8b1f0a9d4c7e2b6a3f8d1c5e9b0a7f4d2c6e1b8a5f3d907",
   includes: [
     {
       source: AWS_ORIGIN,
@@ -153,7 +153,7 @@ export const mockListingUntrusted: Listing = {
       origin: null,
       category: "Deploy",
       description:
-        "Tunes the environment's full parameter set in one pass — most operators only ever touch the first few; everything else is fine at its default. Exercises the parameters module's fold (17 params, 3 required) at the board-app's largest realistic count.",
+        "Tunes the environment's full parameter set in one pass — most operators only ever touch the first few; everything else is fine at its default. Exercises the parameters module's fold (19 params, 4 required) at the board-app's largest realistic count.",
       params: [
         { name: "target", kind: "input", default: null },
         { name: "version", kind: "input", default: null },
@@ -163,7 +163,9 @@ export const mockListingUntrusted: Listing = {
         { name: "timeout", kind: "input", default: "30s" },
         { name: "retries", kind: "input", default: "2" },
         { name: "log_level", kind: "pick", options: ["debug", "info", "warn", "error"], default: "info" },
-        { name: "dry_run", kind: "input", default: "false" },
+        { name: "dry_run", kind: "flag", arg: "--dry-run" },
+        { name: "only", kind: "repeat", arg: "--only", min: 0, max: 3, secret: false },
+        { name: "hosts", kind: "repeat", arg: null, min: 1, max: null, secret: false },
         { name: "cache", kind: "input", default: "true" },
         { name: "batch_size", kind: "input", default: "100" },
         { name: "concurrency", kind: "input", default: "4" },
@@ -183,7 +185,6 @@ export const mockListingUntrusted: Listing = {
 export const mockListingTrusted: Listing = { ...mockListingUntrusted, trusted: true };
 
 export const mockDoctorReport: DoctorReport = {
-  schema: 1,
   name: "acme-ops",
   manifest: mockListingUntrusted.manifest,
   commands: [
