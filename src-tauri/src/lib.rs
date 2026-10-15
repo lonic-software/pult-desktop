@@ -1,5 +1,4 @@
 mod commands;
-pub mod events;
 pub mod journal;
 pub mod pult_bin;
 pub mod types;
