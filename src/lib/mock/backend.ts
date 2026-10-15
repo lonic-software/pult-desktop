@@ -36,7 +36,7 @@ export async function doctorCheck(_path: string): Promise<DoctorReport> {
 }
 
 export async function pultVersion(): Promise<string> {
-  return "pult 0.4.0";
+  return "pult 0.5.0";
 }
 
 export async function getPultPath(): Promise<string | null> {

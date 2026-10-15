@@ -1,6 +1,6 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/lonic-software/pult/v0.4.0/pult.schema.json
+# yaml-language-server: $schema=https://raw.githubusercontent.com/lonic-software/pult/v0.5.0/pult.schema.json
 # pult manifest — the operational commands for pult-desktop maintainers.
-# Authoring guide: https://github.com/lonic-software/pult/blob/v0.4.0/docs/authoring.md
+# Authoring guide: https://github.com/lonic-software/pult/blob/v0.5.0/docs/authoring.md
 #
 # Run `pult` for the guided menu, or `pult <id>` directly. Real logic lives
 # in ./bin — these are one-liners that call it.

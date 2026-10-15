@@ -25,7 +25,7 @@ const AWS_ORIGIN = "github.com/opskit/aws-common@v1.4.2";
 const TEST_ORIGIN = "github.com/opskit/test-harness@v0.9.0";
 
 export const mockListingUntrusted: Listing = {
-  pult_version: "0.4.0",
+  pult_version: "0.5.0",
   name: "acme-ops",
   manifest: "/Users/operator/acme-ops/pult.yaml",
   dir: "/Users/operator/acme-ops",
