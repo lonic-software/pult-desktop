@@ -69,9 +69,10 @@ by `$PULT_EVENTS` — three verbs (`step <k>/<n> <name>`, `progress <0-100|?>
 ignored. pult claims that channel for the commands it runs and records what
 arrives in the run's journal (`docs/run-journal.md`), so this app never
 parses the protocol itself. `src-tauri/src/pult_bin.rs`'s `spawn_run` starts
-`pult <id> --params-json --run-id <run_id>` with any inherited `PULT_EVENTS`
-removed from its environment — otherwise pult's passthrough rule would hand
-our channel to the child and journal no step/progress/status at all — and
+`pult <id> --params-json --run-id <run_id>` with any `PULT_EVENTS` the app
+itself inherited (from an outer `pult dev`, say) removed from its
+environment — otherwise pult's passthrough rule would hand that outer
+channel to the child and journal no step/progress/status at all — and
 `crate::journal::tail_run` reads the run's `events.jsonl` back, emitting
 typed `Line`/`Step`/`Progress`/`Status`/`Exit` events on the
 `pult://run-output` channel (see `RunEvent` in `src-tauri/src/types.rs`).
@@ -85,11 +86,16 @@ journaled `pgid` and sends `SIGTERM` to the whole process group, then
 `SIGKILL` after a grace period (`STOP_GRACE`) if the run's writer is still
 alive. The capability lives in the journal rather than in any in-process
 registry, so it works the same for a run this app never spawned. Stopping a
-run that isn't running is a reportable error, not a silent no-op.
+run whose journaled status is already `exited` or `stopped` is a reportable
+error, not a silent no-op; a crashed run (meta still `running`, writer gone)
+is signalled and reports success.
 
 **Windows**: pult does not journal runs there (`docs/run-journal.md`,
-"Writer rules"), and `stop_run` reports that stopping isn't supported on this
-platform yet.
+"Writer rules"), and everything a run shows here comes from the journal. So
+a run on Windows shows none of pult's output or its exit code: a run that
+exits 0 ends with a "pult never journaled this run" notice, and one that
+fails before running shows pult's captured stderr. `stop_run` reports that
+stopping isn't supported on this platform yet.
 
 ## Dev setup
 
@@ -307,8 +313,8 @@ tauri-plugin-store, see `src/lib/real/rackStore.ts`) with the last-active
 device re-opened on launch. A device card shows a status lamp (green =
 active, amber = a run streaming in a background device, red = untrusted or
 unavailable), the repo path, and an "N instruments" count; hovering
-reveals an eject control (ejecting stops any of its still-running
-commands). The dashed "Mount device" bay below the cards is the add-repo
+reveals an eject control (ejecting unmounts the device only; its
+still-running commands keep going and reappear if it is mounted again). The dashed "Mount device" bay below the cards is the add-repo
 affordance — the toolbar no longer has an "Open repository…" button; the
 rack owns that. The sidebar collapses to a thin rail (persisted in
 localStorage).
@@ -508,12 +514,13 @@ app uses; its test sets `PULT_TRUST_STORE` on the test process itself for
 that reason, so it stays a single sequential `#[tokio::test]` rather than
 several — see the comment on `resolve_pick_source_end_to_end`. The run
 journal (see "Progress events" above) has the same constraint and the same
-fix: `journal_reader_end_to_end_against_the_real_pult_binary`, a sequential
-unix-only test in `src-tauri/src/journal.rs`, covers backlog replay of the
-fixture's `pipeline` command (list-form `run:` over named `steps:` that also
-emit explicit `progress`/`status` lines, see `tests/fixtures/repo/pult.yaml`),
-live-follow and stop of a running command, crash detection, and a restarted
-tail.
+fix: `journal_reader_end_to_end_against_the_real_pult_binary`, one
+sequential test in `src-tauri/src/journal.rs`, runs its scenarios against
+the real binary — among them backlog replay of the fixture's `pipeline`
+command (list-form `run:` over named `steps:` that also emit explicit
+`progress`/`status` lines, see `tests/fixtures/repo/pult.yaml`), live-follow
+and stop of a running command, crash detection, pre-journal spawn-failure
+capture, and a restarted tail. Its stop and crash scenarios assume unix.
 
 Mock-mode UI screenshots are the other half of manual verification — see
 "Mock mode" above for the URL params used to script them. The current

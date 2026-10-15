@@ -211,9 +211,11 @@ fn schema_mismatch(schema: u64) -> String {
 }
 
 /// A line of output streamed while a command runs, the step/progress/status
-/// events pult journals from its `PULT_EVENTS` channel (read back by
-/// `crate::journal::tail_run`), plus the terminal exit event. Emitted on the
-/// `pult://run-output` Tauri event channel.
+/// events pult journals from its `PULT_EVENTS` channel, plus the terminal
+/// exit event — all read back from the run's journal by
+/// `crate::journal::tail_run`. Emitted on the `pult://run-output` Tauri
+/// event channel. pult does not journal runs on Windows, so there only the
+/// tail's own fallback events arrive.
 ///
 /// `run_id` is a client-generated id (one per `run_command` invocation),
 /// threaded through so the frontend can tell concurrent runs apart — the

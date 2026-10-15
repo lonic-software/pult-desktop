@@ -2426,9 +2426,10 @@ mod tests {
     //
     // Skips (with a printed note) rather than failing the suite if no pult
     // binary is available, matching `tests/pult_backend.rs`'s convention —
-    // this crate doesn't vendor pult itself. `PULT_STATE_DIR` is the only
-    // env var this test touches, and no other test in this file touches it,
-    // so it's safe under Rust's default parallel test execution.
+    // this crate doesn't vendor pult itself. `PULT_STATE_DIR` and
+    // `PULT_TRUST_STORE` are the only env vars this test sets, and no other
+    // test in this file touches either, so it's safe under Rust's default
+    // parallel test execution.
     mod real_pult_e2e {
         use super::*;
         use std::process::Stdio as StdStdio;

@@ -85,8 +85,11 @@ export interface DoctorReport {
 //
 // `step`/`progress`/`status` come from pult's `PULT_EVENTS` channel (the
 // pult repo's docs/reference.md, "Events protocol — PULT_EVENTS"), which
-// pult journals and src-tauri/src/journal.rs reads back. Unix only: pult
-// does not journal runs on Windows (docs/run-journal.md, "Writer rules").
+// pult journals and src-tauri/src/journal.rs reads back — as it does every
+// other kind here. pult does not journal runs on Windows (docs/run-journal.md,
+// "Writer rules"), so there a run gets none of these from pult: only the
+// tail's own "never journaled" notice, or pult's captured stderr when the
+// spawn fails, then an `exit` with no code.
 //
 // `tail_gen` (fix round 2's generation-fenced tail restart —
 // src-tauri/src/journal.rs's `TailRegistry`) is additive on every kind but

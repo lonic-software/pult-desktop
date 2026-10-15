@@ -488,8 +488,9 @@ async fn run_pick_source(script: &str, cwd: &str) -> Result<Vec<String>, String>
 /// a repo-scoped `crate::journal::tail_run` reads everything back from the
 /// run's journal instead, and `crate::journal::stop_run` signals the
 /// journaled `pgid` directly. Values are still fed as JSON on stdin exactly
-/// as before (keeps secrets out of argv/shell history); stdout/stderr are
-/// `Stdio::null()` since nothing here reads them.
+/// as before (keeps secrets out of argv/shell history); stdout is
+/// `Stdio::null()` since nothing here reads it, and stderr is piped so a
+/// spawn that fails before journaling can still be reported (see below).
 ///
 /// `PULT_ORIGIN=desktop` is set so the journal's `meta.json.origin` records
 /// who spawned the run. The child is placed in its own process group (unix

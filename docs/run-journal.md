@@ -209,17 +209,18 @@ by crash detection, which is the honest description of what happened.
 
 Windows: moot for now, since journaling itself is off there (see Writer
 rules) — there is no journaled `pgid` to signal in the first place.
-Stopping an app-spawned run on Windows falls back to whatever
-non-journal-based mechanism the desktop's stop feature already uses there
-today (`TerminateProcess` on the pid).
+(This draft planned to keep the desktop's pre-journal `TerminateProcess`
+fallback there; that fallback was removed with the in-process run registry,
+and the desktop's `stop_run` now reports stopping as unsupported on
+Windows.)
 
 ## Interaction with `PULT_EVENTS` (breaking-ish change, by design)
 
 pult's documented passthrough rule says: if `PULT_EVENTS` is already set
 when pult runs a command, pult creates no pipe and does no translation —
-the channel passes through to whoever claimed it. **The desktop app claims
-it today** (see `pult_bin.rs::run_streaming`), which means under the
-current arrangement *pult never sees step/progress/status events for
+the channel passes through to whoever claimed it. **Before the journal, the
+desktop app claimed it** (the since-removed `pult_bin.rs::run_streaming`),
+which meant under that arrangement *pult never saw step/progress/status events for
 app-spawned runs* — and therefore could not journal them.
 
 Resolution: once the journal ships, the desktop stops claiming
