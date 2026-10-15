@@ -34,8 +34,8 @@ spec):
 - `pult <id> --params-json` — run a command, values fed on stdin (keeps
   secrets out of argv and shell history)
 - `pult --version` — sanity-check the resolved binary
-- The `PULT_EVENTS` machine-events channel (unix only) — see "Progress
-  events" below
+- The run journal pult writes for a `--run-id` run (unix only) — see
+  "Progress events" below
 
 Every `--json` document is an envelope — `{lonic_json, tool, schema, command,
 ok, data | error}` — and the app reads `data` only from a schema-2 document.
@@ -66,44 +66,30 @@ pult's `docs/reference.md` ("Events protocol — `PULT_EVENTS`") documents a
 line-based protocol a running command may optionally write to the fd named
 by `$PULT_EVENTS` — three verbs (`step <k>/<n> <name>`, `progress <0-100|?>
 [text]`, `status <text>`), unknown verbs and malformed lines always silently
-ignored — and a passthrough rule: "if `PULT_EVENTS` is already set in pult's
-own environment when it runs a command, pult does nothing — no pipe, no
-translation. The var and its fd inherit through to the child as-is." This app
-claims that channel itself (unix only — see below), the same
-"replicate pult's documented behavior rather than invent new ones" approach
-`resolve_pick_source` above already takes: `src-tauri/src/pult_bin.rs`'s
-`run_streaming` creates an OS pipe, hands the write end to the spawned `pult`
-process as fd 3 (dup'd in via `pre_exec`, since neither `std` nor `tokio` have
-a first-class "extra inherited fd" API — mirroring pult's own
-`src/runner.rs::run_with_own_channel`), sets `PULT_EVENTS=3`, and reads lines
-off the read end concurrently with stdout/stderr, parsing each with
-`src-tauri/src/events.rs` (a line-for-line mirror of pult's own parser) and
-emitting typed `Step`/`Progress`/`Status` events on the `pult://run-output`
-channel alongside `Line`/`Exit` (see `RunEvent` in `src-tauri/src/types.rs`).
+ignored. pult claims that channel for the commands it runs and records what
+arrives in the run's journal (`docs/run-journal.md`), so this app never
+parses the protocol itself. `src-tauri/src/pult_bin.rs`'s `spawn_run` starts
+`pult <id> --params-json --run-id <run_id>` with any inherited `PULT_EVENTS`
+removed from its environment — otherwise pult's passthrough rule would hand
+our channel to the child and journal no step/progress/status at all — and
+`crate::journal::tail_run` reads the run's `events.jsonl` back, emitting
+typed `Line`/`Step`/`Progress`/`Status`/`Exit` events on the
+`pult://run-output` channel (see `RunEvent` in `src-tauri/src/types.rs`).
 `--list --json`'s per-command `steps` field (the labels a compiled step list
 emits `step k/n <name>` for automatically) is parsed the same way as every
-other listing field, so a step-ladder UI can render its skeleton before a run
-even starts.
+other listing field, so the stages screen can render its skeleton before a
+run even starts.
 
-**Windows**: `pre_exec`/arbitrary-fd-inheritance has no equivalent in
-`std::process` there, so `run_streaming` never sets `PULT_EVENTS` and never
-creates a pipe on that platform — no step/progress/status events flow, but
-stdout/stderr streaming and stopping a run (below) both work the same as on
-unix. This isn't a workaround pending a fix; it's the documented degradation
-for a platform pult's own OSC-translating channel doesn't fully cover either.
+**Stopping a run**: `stop_run` (`crate::journal::stop_run`) reads the run's
+journaled `pgid` and sends `SIGTERM` to the whole process group, then
+`SIGKILL` after a grace period (`STOP_GRACE`) if the run's writer is still
+alive. The capability lives in the journal rather than in any in-process
+registry, so it works the same for a run this app never spawned. Stopping a
+run that isn't running is a reportable error, not a silent no-op.
 
-**Stopping a run**: the new `stop_run` Tauri command (backed by
-`RunRegistry`/`run_streaming` in `pult_bin.rs`) finds the run by the same
-`run_id` `run_command` was given, signals it, and cleans up its registry
-entry when the run ends either way (naturally or stopped) — a `stop_run` call
-for a `run_id` that's already finished is a reportable error, not a silent
-no-op. On unix the spawned `pult` process is placed in its own process group
-(`process_group(0)`) so `sh -c "<script>"` and anything *it* spawns die too,
-not just `pult` itself: `SIGTERM` to the group, escalating to `SIGKILL` after
-a 3-second grace period if it's still alive. On Windows, `child.start_kill()`
-(`TerminateProcess`) is used directly, once — no group or escalation concept
-to add there. Either way the terminal event on `pult://run-output` is flagged
-`stopped: true`, distinct from a natural (possibly non-zero) exit.
+**Windows**: pult does not journal runs there (`docs/run-journal.md`,
+"Writer rules"), and `stop_run` reports that stopping isn't supported on this
+platform yet.
 
 ## Dev setup
 
@@ -387,12 +373,6 @@ descriptions than the design mockup's placeholders) allows.
 **Not wired up yet** (see "Next steps"):
 
 - A pty-backed runner for `interactive` commands
-- Rendering the `PULT_EVENTS` step/progress/status events and the listing's
-  `steps` field in the UI — the backend now claims the channel, parses and
-  streams them, and can stop a run (see "Progress events" above and
-  `RunEvent` in `src-tauri/src/types.rs`); `src/routes/+page.svelte`'s `runs`
-  map holds the latest of each per run alongside `lines`, but nothing renders
-  them into a step ladder yet
 
 ## Sidecar bundling
 
@@ -503,12 +483,6 @@ list). Real logic lives in `./bin`; the yaml is one-liners over it.
 
 - **pty runner** — a real terminal surface (portable-pty or similar) so
   `interactive: true` commands can run in-app instead of being refused.
-- **`PULT_EVENTS` step ladder UI** — the backend now claims the channel,
-  parses step/progress/status events, and can stop a run (see "Progress
-  events" above); still needed is the actual step-ladder/percentage
-  rendering in `RunView` and a "Stop" control wired to `stopRun`
-  (`src/lib/api.ts`) — both currently only reachable via the data layer
-  (`RunEvent`, `runs` map), not the UI.
 - **Packaging/signing** — the macOS bundle is ad-hoc signed
   (`bundle.macOS.signingIdentity: "-"` in `src-tauri/tauri.conf.json`), so
   Gatekeeper treats it as a normal unverified app (Privacy & Security →
@@ -532,15 +506,14 @@ has no way to pass a per-call env override (unlike the other tests' local
 `run_in_fixture` helper), since it goes through the same `run_capture` the
 app uses; its test sets `PULT_TRUST_STORE` on the test process itself for
 that reason, so it stays a single sequential `#[tokio::test]` rather than
-several — see the comment on `resolve_pick_source_end_to_end`. `run_streaming`
-(events + `stop_run`, see "Progress events" above) has the same constraint
-and the same fix: `run_streaming_emits_events_and_stop_run_kills_the_group`
-covers both scenarios in one sequential unix-only test — the fixture's
-`pipeline` command (list-form `run:` over named `steps:` that also emit
-explicit `progress`/`status` lines, see `tests/fixtures/repo/pult.yaml`) for
-the events half, and the fixture's `sleep-loop` command (an infinite loop)
-started then stopped, asserting the process group is actually gone
-afterward (`kill -0`), for the stop half.
+several — see the comment on `resolve_pick_source_end_to_end`. The run
+journal (see "Progress events" above) has the same constraint and the same
+fix: `journal_reader_end_to_end_against_the_real_pult_binary`, a sequential
+unix-only test in `src-tauri/src/journal.rs`, covers backlog replay of the
+fixture's `pipeline` command (list-form `run:` over named `steps:` that also
+emit explicit `progress`/`status` lines, see `tests/fixtures/repo/pult.yaml`),
+live-follow and stop of a running command, crash detection, and a restarted
+tail.
 
 Mock-mode UI screenshots are the other half of manual verification — see
 "Mock mode" above for the URL params used to script them. The current

@@ -210,9 +210,9 @@ fn schema_mismatch(schema: u64) -> String {
     )
 }
 
-/// A line of output streamed while a command runs, the machine events pult
-/// may emit on its `PULT_EVENTS` channel (see `crate::events` and
-/// `pult_bin::run_streaming`), plus the terminal exit event. Emitted on the
+/// A line of output streamed while a command runs, the step/progress/status
+/// events pult journals from its `PULT_EVENTS` channel (read back by
+/// `crate::journal::tail_run`), plus the terminal exit event. Emitted on the
 /// `pult://run-output` Tauri event channel.
 ///
 /// `run_id` is a client-generated id (one per `run_command` invocation),
@@ -250,8 +250,8 @@ pub enum RunEvent {
         tail_gen: Option<u64>,
     },
     /// `step <k>/<n> <name>` from the `PULT_EVENTS` channel — entering step
-    /// `k` of `n` (1-based). Unix only: this app only claims the channel on
-    /// unix (see `pult_bin::run_streaming`), so this never fires on Windows.
+    /// `k` of `n` (1-based), as pult journaled it. Unix only: pult does not
+    /// journal runs on Windows (docs/run-journal.md, "Writer rules").
     Step {
         run_id: String,
         k: u32,

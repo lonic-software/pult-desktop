@@ -85,10 +85,8 @@ export interface DoctorReport {
 //
 // `step`/`progress`/`status` come from pult's `PULT_EVENTS` channel (the
 // pult repo's docs/reference.md, "Events protocol — PULT_EVENTS"), which
-// this app claims itself — see `run_streaming` in src-tauri/src/pult_bin.rs.
-// Unix only: on Windows nothing sets `PULT_EVENTS`, so these three kinds
-// simply never arrive there; stdout/stderr `line`s and the terminal `exit`
-// still do.
+// pult journals and src-tauri/src/journal.rs reads back. Unix only: pult
+// does not journal runs on Windows (docs/run-journal.md, "Writer rules").
 //
 // `tail_gen` (fix round 2's generation-fenced tail restart —
 // src-tauri/src/journal.rs's `TailRegistry`) is additive on every kind but
